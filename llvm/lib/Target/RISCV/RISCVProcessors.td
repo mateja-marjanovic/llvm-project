@@ -801,7 +801,7 @@ def ANDES_AX45MPV : RISCVProcessorModel<"andes-ax45mpv",
                                         Andes45TuneFeatures>;
 
 def NEXTSILICON_NS_CORE_V2
-    : RISCVProcessorModel<"nextsilicon-ns-core-v2", NoSchedModel,
+    : RISCVProcessorModel<"nextsilicon-ns-core-v2", NSCoreModel,
                           [
                             Feature64Bit, FeatureStdExtI, FeatureStdExtM,
                             FeatureStdExtA, FeatureStdExtF, FeatureStdExtD,
@@ -810,7 +810,7 @@ def NEXTSILICON_NS_CORE_V2
                           [TuneNSCoreV2]>;
 
 def NEXTSILICON_NS_CORE_V3
-    : RISCVProcessorModel<"nextsilicon-ns-core-v3", NoSchedModel,
+    : RISCVProcessorModel<"nextsilicon-ns-core-v3", NSCoreModel,
                           [
                             Feature64Bit, FeatureStdExtI, FeatureStdExtM,
                             FeatureStdExtA, FeatureStdExtF, FeatureStdExtD,
