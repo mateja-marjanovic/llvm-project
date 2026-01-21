@@ -6067,6 +6067,12 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     CmdArgs.push_back(Args.MakeArgString(CPU));
   }
 
+  // Automatically set LMUL limit to 1 for NextSilicon NS-Core V3.
+  if (Triple.isRISCV() && CPU == "nextsilicon-ns-core-v3") {
+    CmdArgs.push_back("-mllvm");
+    CmdArgs.push_back("-riscv-v-register-bit-width-lmul=1");
+  }
+
   RenderTargetOptions(Triple, Args, KernelOrKext, CmdArgs);
 
   // Add clang-cl arguments.

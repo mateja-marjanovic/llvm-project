@@ -304,6 +304,19 @@
 // RUN: %clang --target=riscv64 -### -c %s 2>&1 -mtune=native | FileCheck -check-prefix=MTUNE-NATIVE %s
 // MTUNE-NATIVE-NOT: "-tune-cpu" "native"
 
+// RUN: %clang --target=riscv64 -### -c %s 2>&1 -mcpu=nextsilicon-ns-core-v2 | FileCheck -check-prefix=MCPU-NEXTSILICON-NS-CORE-V2 %s
+// MCPU-NEXTSILICON-NS-CORE-V2: "-nostdsysteminc" "-target-cpu" "nextsilicon-ns-core-v2"
+// MCPU-NEXTSILICON-NS-CORE-V2: "-target-feature" "+m" "-target-feature" "+a" "-target-feature" "+f" "-target-feature" "+d"
+// MCPU-NEXTSILICON-NS-CORE-V2: "-target-feature" "+c"
+// MCPU-NEXTSILICON-NS-CORE-V2: "-target-abi" "lp64d"
+
+// mcpu with default march
+// RUN: %clang --target=riscv64 -### -c %s 2>&1 -mcpu=nextsilicon-ns-core-v3 | FileCheck -check-prefix=MCPU-NEXTSILICON-NS-CORE-V3 %s
+// MCPU-NEXTSILICON-NS-CORE-V3: "-nostdsysteminc" "-target-cpu" "nextsilicon-ns-core-v3"
+// MCPU-NEXTSILICON-NS-CORE-V3: "-target-feature" "+m" "-target-feature" "+a" "-target-feature" "+f" "-target-feature" "+d"
+// MCPU-NEXTSILICON-NS-CORE-V3: "-target-feature" "+c"
+// MCPU-NEXTSILICON-NS-CORE-V3: "-target-abi" "lp64d"
+
 // -mcpu with default -march
 // RUN: %clang --target=riscv64 -### -c %s 2>&1 -mcpu=sifive-e20 | FileCheck -check-prefix=MCPU-SIFIVE-E20 %s
 // MCPU-SIFIVE-E20: "-nostdsysteminc" "-target-cpu" "sifive-e20"

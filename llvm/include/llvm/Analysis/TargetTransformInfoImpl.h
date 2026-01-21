@@ -1106,6 +1106,12 @@ public:
 
   virtual bool supportsScalableVectors() const { return false; }
 
+  /// \returns True if the target supports strict LMUL=1 (NS-Core V2).
+  virtual bool supportsStrictLMUL() const { return false; }
+
+  /// \returns True if the target supports fractional LMUL (NS-Core V3).
+  virtual bool supportsFractionalLMUL() const { return false; }
+
   virtual bool enableScalableVectorization() const { return false; }
 
   virtual bool hasActiveVectorLength() const { return false; }

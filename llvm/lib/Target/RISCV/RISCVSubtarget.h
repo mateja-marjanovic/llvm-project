@@ -85,6 +85,8 @@ public:
     VentanaVeyron,
     MIPSP8700,
     Andes45,
+    NextSiliconNSCoreV2,
+    NextSiliconNSCoreV3
   };
   enum RISCVVRGatherCostModelEnum : uint8_t {
     Quadratic,

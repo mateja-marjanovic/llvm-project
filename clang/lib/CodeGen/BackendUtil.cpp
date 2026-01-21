@@ -901,7 +901,18 @@ void EmitAssemblyHelper::RunOptimizationPipeline(
   // unrolling.
   PTO.LoopInterleaving = CodeGenOpts.UnrollLoops;
   PTO.LoopVectorization = CodeGenOpts.VectorizeLoop;
-  PTO.SLPVectorization = CodeGenOpts.VectorizeSLP;
+
+  // We should disable SLP vectorization for NS-Core V2 processors.
+  bool shouldDisableSLP = false;
+  if (TM && !TheModule->empty()) {
+    Function &F = *TheModule->begin();
+    TargetTransformInfo TTI = TM->getTargetTransformInfo(F);
+
+    if (TTI.supportsStrictLMUL())
+      shouldDisableSLP = true;
+  }
+  PTO.SLPVectorization = shouldDisableSLP ? false : CodeGenOpts.VectorizeSLP;
+
   PTO.MergeFunctions = CodeGenOpts.MergeFunctions;
   // Only enable CGProfilePass when using integrated assembler, since
   // non-integrated assemblers don't recognize .cgprofile section.

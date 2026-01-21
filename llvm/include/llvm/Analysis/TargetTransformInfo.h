@@ -1857,6 +1857,12 @@ public:
   /// \returns True if the target supports scalable vectors.
   LLVM_ABI bool supportsScalableVectors() const;
 
+  /// \returns True if the target supports strict LMUL=1 (NS-Core V2).
+  LLVM_ABI bool supportsStrictLMUL() const;
+
+  /// \returns True if the target supports fractional LMUL (NS-Core V3).
+  LLVM_ABI bool supportsFractionalLMUL() const;
+
   /// \return true when scalable vectorization is preferred.
   LLVM_ABI bool enableScalableVectorization() const;
 

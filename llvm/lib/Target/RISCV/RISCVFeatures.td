@@ -1787,6 +1787,28 @@ def TunePreferVsetvliOverReadVLENB
                        "true",
                        "Prefer vsetvli over read vlenb CSR to calculate VLEN">;
 
+def FeatureStrictLMUL
+    : SubtargetFeature<"strict-lmul", "HasStrictLMUL", "true",
+                       "Supports only vector instruction with LMUL=1.">;
+def HasStrictLMUL : Predicate<"Subtarget->hasStrictLMUL()">;
+def NotHasStrictLMUL : Predicate<"!Subtarget->hasStrictLMUL()">;
+
+def FeatureFractionalLMUL
+    : SubtargetFeature<"fractional-lmul", "HasFractionalLMUL", "true",
+                       "Supports only vector instruction with LMUL<=1.">;
+def HasFractionalLMUL : Predicate<"Subtarget->hasFractionalLMUL()">;
+
+def TuneNSCoreV2 : SubtargetFeature<"nextsilicon-ns-core-v2", "RISCVProcFamily",
+                                    "NextSiliconNSCoreV2",
+                                    "NextSilicon NS-core V2 processors",
+                                    [TuneNoDefaultUnroll, FeatureStrictLMUL]>;
+
+def TuneNSCoreV3
+    : SubtargetFeature<"nextsilicon-ns-core-v3", "RISCVProcFamily",
+                       "NextSiliconNSCoreV3",
+                       "NextSilicon NS-core V3 processors",
+                       [TuneNoDefaultUnroll, FeatureFractionalLMUL]>;
+
 // Assume that lock-free native-width atomics are available, even if the target
 // and operating system combination would not usually provide them. The user
 // is responsible for providing any necessary __sync implementations. Code
