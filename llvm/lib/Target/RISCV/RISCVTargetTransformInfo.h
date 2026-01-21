@@ -118,6 +118,8 @@ public:
            (ST->getRealMinVLen() >= RISCV::RVVBitsPerBlock);
   }
   bool enableOrderedReductions() const override { return true; }
+  bool supportsStrictLMUL() const override { return ST->hasStrictLMUL(); }
+  bool supportsFractionalLMUL() const override { return ST->hasFractionalLMUL(); }
   bool enableScalableVectorization() const override {
     return ST->hasVInstructions();
   }

@@ -1547,6 +1547,14 @@ bool TargetTransformInfo::enableScalableVectorization() const {
   return TTIImpl->enableScalableVectorization();
 }
 
+bool TargetTransformInfo::supportsStrictLMUL() const {
+  return TTIImpl->supportsStrictLMUL();
+}
+
+bool TargetTransformInfo::supportsFractionalLMUL() const {
+  return TTIImpl->supportsFractionalLMUL();
+}
+
 bool TargetTransformInfo::hasActiveVectorLength() const {
   return TTIImpl->hasActiveVectorLength();
 }

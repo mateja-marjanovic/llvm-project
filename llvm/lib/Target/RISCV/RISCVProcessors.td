@@ -1138,3 +1138,20 @@ def XUANTIE_C920V2 : RISCVProcessorModel<"xt-c920v2",
                                          [TuneVXRMPipelineFlush,
                                           TunePostRAScheduler]>;
 // clang-format on
+def NEXTSILICON_NS_CORE_V2
+    : RISCVProcessorModel<"nextsilicon-ns-core-v2", NoSchedModel,
+                          [
+                            Feature64Bit, FeatureStdExtI, FeatureStdExtM,
+                            FeatureStdExtA, FeatureStdExtF, FeatureStdExtD,
+                            FeatureStdExtC
+                          ],
+                          [TuneNSCoreV2]>;
+
+def NEXTSILICON_NS_CORE_V3
+    : RISCVProcessorModel<"nextsilicon-ns-core-v3", NoSchedModel,
+                          [
+                            Feature64Bit, FeatureStdExtI, FeatureStdExtM,
+                            FeatureStdExtA, FeatureStdExtF, FeatureStdExtD,
+                            FeatureStdExtC
+                          ],
+                          [TuneNSCoreV3]>;

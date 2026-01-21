@@ -2189,6 +2189,28 @@ def TuneMIPSP8700
     : SubtargetFeature<"mips-p8700", "RISCVProcFamily", "MIPSP8700",
                        "MIPS p8700 processor", [], InlineIgnore>;
 
+def FeatureStrictLMUL
+    : SubtargetFeature<"strict-lmul", "HasStrictLMUL", "true",
+                       "Supports only vector instruction with LMUL=1.">;
+def HasStrictLMUL : Predicate<"Subtarget->hasStrictLMUL()">;
+def NotHasStrictLMUL : Predicate<"!Subtarget->hasStrictLMUL()">;
+
+def FeatureFractionalLMUL
+    : SubtargetFeature<"fractional-lmul", "HasFractionalLMUL", "true",
+                       "Supports only vector instruction with LMUL<=1.">;
+def HasFractionalLMUL : Predicate<"Subtarget->hasFractionalLMUL()">;
+
+def TuneNSCoreV2 : SubtargetFeature<"nextsilicon-ns-core-v2", "RISCVProcFamily",
+                                    "NextSiliconNSCoreV2",
+                                    "NextSilicon NS-core V2 processors",
+                                    [TuneNoDefaultUnroll, FeatureStrictLMUL]>;
+
+def TuneNSCoreV3
+    : SubtargetFeature<"nextsilicon-ns-core-v3", "RISCVProcFamily",
+                       "NextSiliconNSCoreV3",
+                       "NextSilicon NS-core V3 processors",
+                       [TuneNoDefaultUnroll, FeatureFractionalLMUL]>;
+
 def TuneSiFive7 : SubtargetFeature<"sifive7", "RISCVProcFamily", "SiFive7",
                                    "SiFive 7-Series processors", [], InlineIgnore>;
 

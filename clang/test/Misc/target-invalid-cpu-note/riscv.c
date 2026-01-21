@@ -64,6 +64,8 @@
 // RISCV64-SAME: {{^}}, xiangshan-nanhu
 // RISCV64-SAME: {{^}}, xt-c910v2
 // RISCV64-SAME: {{^}}, xt-c920v2
+// RISCV64-SAME: {{^}}, nextsilicon-ns-core-v2
+// RISCV64-SAME: {{^}}, nextsilicon-ns-core-v3
 // RISCV64-SAME: {{$}}
 
 // RUN: not %clang_cc1 -triple riscv32 -tune-cpu not-a-cpu -fsyntax-only %s 2>&1 | FileCheck %s --check-prefix TUNE-RISCV32
@@ -138,4 +140,6 @@
 // TUNE-RISCV64-SAME: {{^}}, generic-ooo
 // TUNE-RISCV64-SAME: {{^}}, rocket
 // TUNE-RISCV64-SAME: {{^}}, sifive-7-series
+// TUNE-RISCV64-SAME: {{^}}, nextsilicon-ns-core-v2
+// TUNE-RISCV64-SAME: {{^}}, nextsilicon-ns-core-v3
 // TUNE-RISCV64-SAME: {{$}}
