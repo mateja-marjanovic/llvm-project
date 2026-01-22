@@ -303,6 +303,9 @@ bool RISCVVectorPeephole::isAllOnesMask(const MachineInstr *MaskDef) const {
 /// %x = VL1RE8_V %ptr
 /// VS1R_V %v, %ptr
 bool RISCVVectorPeephole::convertToWholeRegister(MachineInstr &MI) const {
+  if (ST->hasStrictLMUL() || ST->hasFractionalLMUL())
+    return false;
+
 #define CASE_WHOLE_REGISTER_LMUL_SEW(lmul, sew)                                \
   case RISCV::PseudoVLE##sew##_V_M##lmul:                                      \
     NewOpc = RISCV::VL##lmul##RE##sew##_V;                                     \

@@ -53,6 +53,7 @@
 ; CHECK-NEXT:   experimental-zvqdotq             - 'Zvqdotq' (Vector quad widening 4D Dot Product).
 ; CHECK-NEXT:   f                                - 'F' (Single-Precision Floating-Point).
 ; CHECK-NEXT:   forced-atomics                   - Assume that lock-free native-width atomics are available.
+; CHECK-NEXT:   fractional-lmul                  - Supports only vector instruction with LMUL<=1..
 ; CHECK-NEXT:   h                                - 'H' (Hypervisor).
 ; CHECK-NEXT:   i                                - 'I' (Base Integer Instruction Set).
 ; CHECK-NEXT:   ld-add-fusion                    - Enable LD+ADD macrofusion.
@@ -60,6 +61,8 @@
 ; CHECK-NEXT:   lui-addi-fusion                  - Enable LUI+ADDI macro fusion.
 ; CHECK-NEXT:   m                                - 'M' (Integer Multiplication and Division).
 ; CHECK-NEXT:   mips-p8700                       - MIPS p8700 processor.
+; CHECK-NEXT:   nextsilicon-ns-core-v2           - NextSilicon NS-core V2 processors.
+; CHECK-NEXT:   nextsilicon-ns-core-v3           - NextSilicon NS-core V3 processors.
 ; CHECK-NEXT:   no-default-unroll                - Disable default unroll preference..
 ; CHECK-NEXT:   no-sink-splat-operands           - Disable sink splat operands to enable .vx, .vf,.wx, and .wf instructions.
 ; CHECK-NEXT:   no-trailing-seq-cst-fence        - Disable trailing fence for seq-cst store..
@@ -157,6 +160,7 @@
 ; CHECK-NEXT:   sstvala                          - 'Sstvala' (stval provides all needed values).
 ; CHECK-NEXT:   sstvecd                          - 'Sstvecd' (stvec supports Direct mode).
 ; CHECK-NEXT:   ssu64xl                          - 'Ssu64xl' (UXLEN=64 supported).
+; CHECK-NEXT:   strict-lmul                      - Supports only vector instruction with LMUL=1..
 ; CHECK-NEXT:   supm                             - 'Supm' (Indicates User-mode Pointer Masking).
 ; CHECK-NEXT:   svade                            - 'Svade' (Raise exceptions on improper A/D bits).
 ; CHECK-NEXT:   svadu                            - 'Svadu' (Hardware A/D updates).

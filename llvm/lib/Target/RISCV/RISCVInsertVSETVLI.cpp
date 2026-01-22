@@ -363,9 +363,19 @@ DemandedFields getDemanded(const MachineInstr &MI, const RISCVSubtarget *ST) {
   // provided we don't change the ratio.
   // Note: We assume that the instructions initial SEW is the EEW encoded
   // in the opcode.  This is asserted when constructing the VSETVLIInfo.
+  //
+  // On StrictLMUL/FractionalLMUL targets EMUL must be <= 1.  Since
+  // EMUL = LMUL * (EEW / SEW), we enforce SEW == EEW (so EMUL == LMUL <= 1)
+  // by demanding SEWEqual instead of SEWNone.  This forces the pass to insert
+  // a new vsetvli whenever the live SEW differs from EEW, preventing a
+  // situation such as vtype=e8,m1 followed by vse64.v (EMUL=8).
   if (getEEWForLoadStore(MI)) {
-    Res.SEW = DemandedFields::SEWNone;
-    Res.LMUL = DemandedFields::LMULNone;
+    Res.SEW = (ST && (ST->hasStrictLMUL() || ST->hasFractionalLMUL()))
+                  ? DemandedFields::SEWEqual
+                  : DemandedFields::SEWNone;
+    Res.LMUL = (ST && (ST->hasStrictLMUL() || ST->hasFractionalLMUL()))
+                   ? DemandedFields::LMULLessThanOrEqualToM1
+                   : DemandedFields::LMULNone;
   }
 
   // Store instructions don't use the policy fields.
@@ -385,7 +395,9 @@ DemandedFields getDemanded(const MachineInstr &MI, const RISCVSubtarget *ST) {
 
   // For vmv.s.x and vfmv.s.f, there are only two behaviors, VL = 0 and VL > 0.
   if (RISCVInstrInfo::isScalarInsertInstr(MI)) {
-    Res.LMUL = DemandedFields::LMULNone;
+    Res.LMUL = (ST->hasStrictLMUL() || ST->hasFractionalLMUL())
+                   ? DemandedFields::LMULLessThanOrEqualToM1
+                   : DemandedFields::LMULNone;
     Res.SEWLMULRatio = false;
     Res.VLAny = false;
     // For vmv.s.x and vfmv.s.f, if the passthru is *undefined*, we don't
@@ -934,6 +946,38 @@ void RISCVInsertVSETVLI::forwardVSETVLIAVL(VSETVLIInfo &Info) const {
   Info.setAVL(DefInstrInfo);
 }
 
+// For NS-CORE targets (Strict/Fractional LMUL), adjust the VTYPE encoding to
+// use LMUL=M1 while preserving the SEW/LMUL ratio (so VLMAX is unchanged).
+// Falls back to the original encoding when no valid M1 SEW exists for the
+// ratio.  Rewrites any LMUL != 1 -- integer LMUL > 1 and fractional
+// (MF2/MF4/MF8) alike -- except on V3 (FractionalLMUL), which natively
+// supports fractional LMUL and keeps those encodings as-is.
+static unsigned adjustVTYPEForLMUL1(unsigned VType,
+                                    const RISCVSubtarget *ST) {
+  if (!ST->hasStrictLMUL() && !ST->hasFractionalLMUL())
+    return VType;
+  RISCVVType::VLMUL VLMul = RISCVVType::getVLMUL(VType);
+  if (VLMul == RISCVVType::LMUL_1)
+    return VType;
+  auto [LMul, Fractional] = RISCVVType::decodeVLMUL(VLMul);
+  // FractionalLMUL (V3) supports MF2/MF4/MF8 natively - keep those. StrictLMUL
+  // (V2) has no legal fractional LMUL at all: the vsetvli-level VTYPE is what
+  // this function rewrites, which is orthogonal to a single narrowing/
+  // widening instruction's own EMUL>1 on its wide operand (that's tolerated
+  // via the opcode's own defined semantics, not via the ambient vtype being
+  // fractional) -- so any fractional encoding seen here, from any producer,
+  // must still be rescaled to LMUL=1 on StrictLMUL targets.
+  if (Fractional && ST->hasFractionalLMUL())
+    return VType;
+  unsigned SEW = RISCVVType::getSEW(VType);
+  unsigned Ratio = RISCVVType::getSEWLMULRatio(SEW, VLMul);
+  if (!RISCVVType::isValidSEW(Ratio))
+    return VType;
+  return RISCVVType::encodeVTYPE(RISCVVType::LMUL_1, Ratio,
+                                 RISCVVType::isTailAgnostic(VType),
+                                 RISCVVType::isMaskAgnostic(VType));
+}
+
 // Return a VSETVLIInfo representing the changes made by this VSETVLI or
 // VSETIVLI instruction.
 VSETVLIInfo
@@ -1005,6 +1049,19 @@ RISCVInsertVSETVLI::computeInfoForInstr(const MachineInstr &MI) const {
   // A Log2SEW of 0 is an operation on mask registers only.
   unsigned SEW = Log2SEW ? 1 << Log2SEW : 8;
   assert(RISCVVType::isValidSEW(SEW) && "Unexpected SEW");
+
+  // For NS-CORE targets (Strict/Fractional LMUL) with mask-only ops
+  // (Log2SEW=0): mask logical ops like vmand.mm don't depend on LMUL, only VL.
+  // Safe to force M1 since these targets limit data vectors to M1.
+  // Note: we do NOT scale fractional LMUL here because changing SEW would
+  // alter the semantics of data operations (e.g. vslidedown element width).
+  // Fractional LMUL on explicit vsetvlis is handled separately by the
+  // post-pass VTYPE rewriting.
+  if ((ST->hasStrictLMUL() || ST->hasFractionalLMUL()) && !Log2SEW) {
+    auto [LMul, Fractional] = RISCVVType::decodeVLMUL(VLMul);
+    if (!Fractional && LMul > 1)
+      VLMul = RISCVVType::LMUL_1;
+  }
 
   if (RISCVII::hasVLOp(TSFlags)) {
     const MachineOperand &VLOp = MI.getOperand(getVLOpNum(MI));
@@ -1169,14 +1226,23 @@ bool RISCVInsertVSETVLI::needVSETVLI(const DemandedFields &Used,
 // places.
 static VSETVLIInfo adjustIncoming(const VSETVLIInfo &PrevInfo,
                                   const VSETVLIInfo &NewInfo,
-                                  DemandedFields &Demanded) {
+                                  DemandedFields &Demanded,
+                                  const RISCVSubtarget *ST) {
   VSETVLIInfo Info = NewInfo;
 
   if (!Demanded.LMUL && !Demanded.SEWLMULRatio && PrevInfo.isValid() &&
       !PrevInfo.isUnknown()) {
     if (auto NewVLMul = RISCVVType::getSameRatioLMUL(
-            PrevInfo.getSEW(), PrevInfo.getVLMUL(), Info.getSEW()))
-      Info.setVLMul(*NewVLMul);
+            PrevInfo.getSEW(), PrevInfo.getVLMUL(), Info.getSEW())) {
+      // For NS-CORE targets, don't scale LMUL above M1 just to preserve the
+      // ratio. Prefer a clean M1 over eliminating a VL toggle. Fractional
+      // results are still allowed under FractionalLMUL.
+      bool LMUL1Only = ST->hasStrictLMUL() || ST->hasFractionalLMUL();
+      auto [NewLMul, NewFractional] = RISCVVType::decodeVLMUL(*NewVLMul);
+      bool NewIsAboveM1 = !NewFractional && NewLMul > 1;
+      if (!LMUL1Only || !NewIsAboveM1)
+        Info.setVLMul(*NewVLMul);
+    }
     Demanded.LMUL = DemandedFields::LMULEqual;
   }
 
@@ -1189,7 +1255,8 @@ static VSETVLIInfo adjustIncoming(const VSETVLIInfo &PrevInfo,
 void RISCVInsertVSETVLI::transferBefore(VSETVLIInfo &Info,
                                         const MachineInstr &MI) const {
   if (isVectorCopy(ST->getRegisterInfo(), MI) &&
-      (Info.isUnknown() || !Info.isValid() || Info.hasSEWLMULRatioOnly())) {
+      (Info.isUnknown() || !Info.isValid() || Info.hasSEWLMULRatioOnly()) &&
+      !ST->hasStrictLMUL() && !ST->hasFractionalLMUL()) {
     // Use an arbitrary but valid AVL and VTYPE so vill will be cleared. It may
     // be coalesced into another vsetvli since we won't demand any fields.
     VSETVLIInfo NewInfo; // Need a new VSETVLIInfo to clear SEWLMULRatioOnly
@@ -1213,7 +1280,7 @@ void RISCVInsertVSETVLI::transferBefore(VSETVLIInfo &Info,
   if (!Info.isValid() || Info.isUnknown())
     Info = NewInfo;
 
-  const VSETVLIInfo IncomingInfo = adjustIncoming(PrevInfo, NewInfo, Demanded);
+  const VSETVLIInfo IncomingInfo = adjustIncoming(PrevInfo, NewInfo, Demanded, ST);
 
   // If MI only demands that VL has the same zeroness, we only need to set the
   // AVL if the zeroness differs.  This removes a vsetvli entirely if the types
@@ -1420,7 +1487,8 @@ void RISCVInsertVSETVLI::emitVSETVLIs(MachineBasicBlock &MBB) {
     }
 
     if (EnsureWholeVectorRegisterMoveValidVTYPE &&
-        isVectorCopy(ST->getRegisterInfo(), MI)) {
+        isVectorCopy(ST->getRegisterInfo(), MI) && !ST->hasStrictLMUL() &&
+        !ST->hasFractionalLMUL()) {
       if (!PrevInfo.isCompatible(DemandedFields::all(), CurInfo, LIS)) {
         insertVSETVLI(MBB, MI, MI.getDebugLoc(), CurInfo, PrevInfo);
         PrefixTransparent = false;
@@ -1860,6 +1928,23 @@ bool RISCVInsertVSETVLI::runOnMachineFunction(MachineFunction &MF) {
   // of VLEFF/VLSEGFF.
   for (MachineBasicBlock &MBB : MF)
     insertReadVL(MBB);
+
+  // For NS-CORE targets, rewrite VSETVLI VTYPE encodings whose integer LMUL > 1
+  // to use M1 while preserving the SEW/LMUL ratio.  Fractional encodings are
+  // preserved for FractionalLMUL targets.  This runs after all dataflow phases
+  // so it doesn't interfere with the invariant checks.
+  if (ST->hasStrictLMUL() || ST->hasFractionalLMUL()) {
+    for (MachineBasicBlock &MBB : MF) {
+      for (MachineInstr &MI : MBB) {
+        if (!RISCVInstrInfo::isVectorConfigInstr(MI))
+          continue;
+        unsigned VType = MI.getOperand(2).getImm();
+        unsigned Adjusted = adjustVTYPEForLMUL1(VType, ST);
+        if (Adjusted != VType)
+          MI.getOperand(2).setImm(Adjusted);
+      }
+    }
+  }
 
   BlockInfo.clear();
   return HaveVectorOp;

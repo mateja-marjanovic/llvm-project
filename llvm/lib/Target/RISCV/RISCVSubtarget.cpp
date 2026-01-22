@@ -188,6 +188,10 @@ unsigned RISCVSubtarget::getMinRVVVectorSizeInBits() const {
 unsigned RISCVSubtarget::getMaxLMULForFixedLengthVectors() const {
   assert(hasVInstructions() &&
          "Tried to get vector length without Zve or V extension support!");
+  //if (hasStrictLMUL())
+  //  return 1;
+  if (hasFractionalLMUL())
+   return 1;
   assert(RVVVectorLMULMax <= 8 &&
          llvm::has_single_bit<uint32_t>(RVVVectorLMULMax) &&
          "V extension requires a LMUL to be at most 8 and a power of 2!");

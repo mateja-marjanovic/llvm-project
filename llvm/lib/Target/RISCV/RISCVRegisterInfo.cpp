@@ -646,6 +646,9 @@ bool RISCVRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
   case RISCV::PseudoVSPILL6_M1:
   case RISCV::PseudoVSPILL7_M1:
   case RISCV::PseudoVSPILL8_M1:
+  case RISCV::PseudoVSPILL_VRM2:
+  case RISCV::PseudoVSPILL_VRM4:
+  case RISCV::PseudoVSPILL_VRM8:
     lowerVSPILL(II);
     return true;
   case RISCV::PseudoVRELOAD2_M1:
@@ -659,6 +662,9 @@ bool RISCVRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
   case RISCV::PseudoVRELOAD6_M1:
   case RISCV::PseudoVRELOAD7_M1:
   case RISCV::PseudoVRELOAD8_M1:
+  case RISCV::PseudoVRELOAD_VRM2:
+  case RISCV::PseudoVRELOAD_VRM4:
+  case RISCV::PseudoVRELOAD_VRM8:
     lowerVRELOAD(II);
     return true;
   }

@@ -974,7 +974,9 @@ multiclass VPatBinaryWVL_VV_VX<SDPatternOperator vop, string instruction_name> {
     defvar vti = VtiToWti.Vti;
     defvar wti = VtiToWti.Wti;
     let Predicates = !listconcat(GetVTypePredicates<vti>.Predicates,
-                                 GetVTypePredicates<wti>.Predicates) in {
+                                 GetVTypePredicates<wti>.Predicates,
+                                 !if(!eq(vti.LMul.MX, "M1"),
+                                     [], [NotHasStrictLMUL])) in {
       def : VPatBinaryVL_V<vop, instruction_name, "VV",
                            wti.Vector, vti.Vector, vti.Vector, vti.Mask,
                            vti.Log2SEW, vti.LMul, wti.RegClass, vti.RegClass,
@@ -993,23 +995,29 @@ multiclass VPatBinaryWVL_VV_VX_WV_WX<SDPatternOperator vop, SDNode vop_w,
   foreach VtiToWti = AllWidenableIntVectors in {
     defvar vti = VtiToWti.Vti;
     defvar wti = VtiToWti.Wti;
+    let Predicates =
+        !listconcat(GetVTypePredicates<vti>.Predicates,
+                    GetVTypePredicates<wti>.Predicates, [NotHasStrictLMUL]) in {
+      defm:
+        VPatTiedBinaryNoMaskVL_V<vop_w, instruction_name, "WV", wti.Vector,
+                                vti.Vector, vti.Log2SEW, vti.LMul, wti.RegClass,
+                                vti.RegClass>;
+      def:
+        VPatTiedBinaryMaskVL_V<vop_w, instruction_name, "WV", wti.Vector,
+                              vti.Vector, wti.Mask, vti.Log2SEW, vti.LMul,
+                              wti.RegClass, vti.RegClass>;
+    }
     let Predicates = !listconcat(GetVTypePredicates<vti>.Predicates,
-                                 GetVTypePredicates<wti>.Predicates) in {
-      defm : VPatTiedBinaryNoMaskVL_V<vop_w, instruction_name, "WV",
-                                      wti.Vector, vti.Vector, vti.Log2SEW,
-                                      vti.LMul, wti.RegClass, vti.RegClass>;
-      def : VPatTiedBinaryMaskVL_V<vop_w, instruction_name, "WV",
-                                   wti.Vector, vti.Vector, wti.Mask,
-                                   vti.Log2SEW, vti.LMul, wti.RegClass,
-                                   vti.RegClass>;
-      def : VPatBinaryVL_V<vop_w, instruction_name, "WV",
-                           wti.Vector, wti.Vector, vti.Vector, vti.Mask,
-                           vti.Log2SEW, vti.LMul, wti.RegClass, wti.RegClass,
-                           vti.RegClass>;
-      def : VPatBinaryVL_XI<vop_w, instruction_name, "WX",
-                            wti.Vector, wti.Vector, vti.Vector, vti.Mask,
-                            vti.Log2SEW, vti.LMul, wti.RegClass, wti.RegClass,
-                            SplatPat, GPR>;
+                                 GetVTypePredicates<wti>.Predicates,
+                                 [NotHasStrictLMUL]) in {
+      def:
+        VPatBinaryVL_V<vop_w, instruction_name, "WV", wti.Vector, wti.Vector,
+                      vti.Vector, vti.Mask, vti.Log2SEW, vti.LMul, wti.RegClass,
+                      wti.RegClass, vti.RegClass>;
+      def:
+        VPatBinaryVL_XI<vop_w, instruction_name, "WX", wti.Vector, wti.Vector,
+                        vti.Vector, vti.Mask, vti.Log2SEW, vti.LMul, wti.RegClass,
+                        wti.RegClass, SplatPat, GPR>;
     }
   }
 }
@@ -1804,7 +1812,9 @@ multiclass VPatWidenMultiplyAddVL_VV_VX<SDNode vwmacc_op, string instr_name> {
     defvar vti = vtiTowti.Vti;
     defvar wti = vtiTowti.Wti;
     let Predicates = !listconcat(GetVTypePredicates<vti>.Predicates,
-                                 GetVTypePredicates<wti>.Predicates) in {
+                                 GetVTypePredicates<wti>.Predicates,
+                                 !if(!eq(vti.LMul.MX, "M1"),
+                                     [], [NotHasStrictLMUL])) in {
       def : Pat<(vwmacc_op (vti.Vector vti.RegClass:$rs1),
                            (vti.Vector vti.RegClass:$rs2),
                            (wti.Vector wti.RegClass:$rd),
@@ -2143,7 +2153,9 @@ foreach vtiToWti = AllWidenableIntVectors in {
   defvar vti = vtiToWti.Vti;
   defvar wti = vtiToWti.Wti;
   let Predicates = !listconcat(GetVTypePredicates<vti>.Predicates,
-                               GetVTypePredicates<wti>.Predicates) in {
+                               GetVTypePredicates<wti>.Predicates,
+                               !if(!eq(vti.LMul.MX, "M1"),
+                                   [], [NotHasStrictLMUL])) in {
     def : Pat<(riscv_shl_vl (wti.Vector (riscv_sext_vl_oneuse
                               (vti.Vector vti.RegClass:$rs1),
                               (vti.Mask VMV0:$vm), VLOpFrag)),
@@ -2172,7 +2184,9 @@ multiclass VPatWidenOrDisjointVL_VV_VX<SDNode extop, string instruction_name> {
     defvar vti = vtiToWti.Vti;
     defvar wti = vtiToWti.Wti;
     let Predicates = !listconcat(GetVTypePredicates<vti>.Predicates,
-                                 GetVTypePredicates<wti>.Predicates) in {
+                                 GetVTypePredicates<wti>.Predicates,
+                                 !if(!eq(vti.LMul.MX, "M1"),
+                                     [], [NotHasStrictLMUL])) in {
       def : Pat<(wti.Vector
                   (extop
                     (vti.Vector
@@ -2342,7 +2356,9 @@ foreach vtiTowti = AllWidenableIntVectors in {
   defvar vti = vtiTowti.Vti;
   defvar wti = vtiTowti.Wti;
   let Predicates = !listconcat(GetVTypePredicates<vti>.Predicates,
-                               GetVTypePredicates<wti>.Predicates) in
+                               GetVTypePredicates<wti>.Predicates,
+                               !if(!eq(vti.LMul.MX, "M1"),
+                                   [], [NotHasStrictLMUL])) in
   def : Pat<(riscv_vwmaccsu_vl (vti.Vector vti.RegClass:$rs1),
                                (SplatPat XLenVT:$rs2),
                                (wti.Vector wti.RegClass:$rd),

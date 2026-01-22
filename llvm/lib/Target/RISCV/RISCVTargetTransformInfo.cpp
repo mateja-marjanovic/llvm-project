@@ -347,6 +347,11 @@ TypeSize
 RISCVTTIImpl::getRegisterBitWidth(TargetTransformInfo::RegisterKind K) const {
   unsigned LMUL =
       llvm::bit_floor(std::clamp<unsigned>(RVVRegisterWidthLMUL, 1, 8));
+  // StrictLMUL forbids LMUL>1; FractionalLMUL allows LMUL<=1 (including
+  // mf2/mf4/mf8). Both imply the vectorizer must not pick a register width
+  // wider than a single LMUL=1 register.
+  if (ST->hasStrictLMUL() || ST->hasFractionalLMUL())
+    LMUL = 1;
   switch (K) {
   case TargetTransformInfo::RGK_Scalar:
     return TypeSize::getFixed(ST->getXLen());

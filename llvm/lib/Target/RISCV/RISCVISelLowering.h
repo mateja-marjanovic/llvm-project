@@ -72,6 +72,8 @@ public:
   bool preferScalarizeSplat(SDNode *N) const override;
 
   bool softPromoteHalfType() const override { return true; }
+  bool canMergeStoresTo(unsigned AddressSpace, EVT MemVT,
+    const MachineFunction &MF) const override;
 
   /// Return the register type for a given MVT, ensuring vectors are treated
   /// as a series of gpr sized integers.
@@ -510,6 +512,7 @@ private:
                              int64_t ExtTrueVal) const;
   SDValue lowerVectorMaskTruncLike(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerVectorTruncLike(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerVectorTruncateToLegalTypes(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerVectorFPExtendOrRoundLike(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerINSERT_VECTOR_ELT(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerEXTRACT_VECTOR_ELT(SDValue Op, SelectionDAG &DAG) const;
@@ -518,6 +521,8 @@ private:
   SDValue LowerINTRINSIC_VOID(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerVPREDUCE(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerVECREDUCE(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerVectorReduceToLegalTypes(SDValue Op, SelectionDAG &DAG,
+                                        EVT VT) const;
   SDValue lowerVectorMaskVecReduction(SDValue Op, SelectionDAG &DAG,
                                       bool IsVP) const;
   SDValue lowerFPVECREDUCE(SDValue Op, SelectionDAG &DAG) const;
@@ -536,11 +541,17 @@ private:
                                                SelectionDAG &DAG) const;
   SDValue lowerMaskedGather(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerMaskedScatter(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerVectorLoadToLegalTypes(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerVectorStoreToLegalTypes(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerVectorStridedLoadToLegalTypes(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerVectorStridedStoreToLegalTypes(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerFixedLengthVectorLoadToRVV(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerFixedLengthVectorStoreToRVV(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerFixedLengthVectorSetccToRVV(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerVectorSetccToLegalTypes(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerFixedLengthVectorSelectToRVV(SDValue Op,
                                             SelectionDAG &DAG) const;
+  SDValue lowerVectorSelectToLegalTypes(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerToScalableOp(SDValue Op, SelectionDAG &DAG) const;
   SDValue LowerIS_FPCLASS(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerVPOp(SDValue Op, SelectionDAG &DAG) const;
@@ -557,6 +568,14 @@ private:
   SDValue lowerVPCttzElements(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerFixedLengthVectorExtendToRVV(SDValue Op, SelectionDAG &DAG,
                                             unsigned ExtendOpc) const;
+  SDValue lowerVectorExtendToLegalTypes(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerVectorINT_TO_FPToLegalTypes(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerVectorTernaryOpToLegalTypes(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerVectorBinaryOpToLegalTypes(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerVectorUnaryOpToLegalTypes(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerVectorGatherToLegalTypes(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerVectorScatterToLegalTypes(SDValue Op, SelectionDAG &DAG) const;
+  bool gatherScatterIndexNeedsSplit(EVT DataVT, SDNode *N) const;
   SDValue lowerGET_ROUNDING(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerSET_ROUNDING(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerGET_FPENV(SDValue Op, SelectionDAG &DAG) const;

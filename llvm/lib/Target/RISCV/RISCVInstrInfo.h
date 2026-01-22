@@ -82,6 +82,8 @@ public:
            MI.getOperand(1).getReg() == RISCV::X0;
   }
 
+  bool expandPostRAPseudo(MachineInstr &MI) const override;
+
   void copyPhysRegVector(MachineBasicBlock &MBB,
                          MachineBasicBlock::iterator MBBI, const DebugLoc &DL,
                          MCRegister DstReg, MCRegister SrcReg, bool KillSrc,

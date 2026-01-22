@@ -6102,6 +6102,28 @@ foreach lmul = MxList in {
   }
 }
 
+// Split VRM2/VRM4/VRM8 spills into M1 whole-register stores/loads.
+// Used for StrictLMUL targets where multi-register load/store instructions
+// (VS2R_V, etc.) are not available. These are expanded post-RA in
+// eliminateFrameIndex, so no virtual-register subregister references are
+// created during register allocation.
+let hasSideEffects = 0, mayLoad = 0, mayStore = 1, isCodeGenOnly = 1 in {
+  let Size = 12 in
+  def PseudoVSPILL_VRM2 : Pseudo<(outs), (ins VRM2:$rs1, GPR:$rs2), []>;
+  let Size = 28 in
+  def PseudoVSPILL_VRM4 : Pseudo<(outs), (ins VRM4:$rs1, GPR:$rs2), []>;
+  let Size = 60 in
+  def PseudoVSPILL_VRM8 : Pseudo<(outs), (ins VRM8:$rs1, GPR:$rs2), []>;
+}
+let hasSideEffects = 0, mayLoad = 1, mayStore = 0, isCodeGenOnly = 1 in {
+  let Size = 12 in
+  def PseudoVRELOAD_VRM2 : Pseudo<(outs VRM2:$rs1), (ins GPR:$rs2), []>;
+  let Size = 28 in
+  def PseudoVRELOAD_VRM4 : Pseudo<(outs VRM4:$rs1), (ins GPR:$rs2), []>;
+  let Size = 60 in
+  def PseudoVRELOAD_VRM8 : Pseudo<(outs VRM8:$rs1), (ins GPR:$rs2), []>;
+}
+
 //===----------------------------------------------------------------------===//
 // 6. Configuration-Setting Instructions
 //===----------------------------------------------------------------------===//
@@ -6803,7 +6825,17 @@ let Predicates = [HasVInstructionsAnyF] in {
 //===----------------------------------------------------------------------===//
 let Predicates = [HasVInstructions] in {
 defm PseudoVRGATHER     : VPseudoVGTR_VV_VX_VI;
+} // Predicates = [HasVInstructions]
+
+// NS-CORE-V2: vrgatherei16.vv always uses an i16 index group whose EMUL =
+// (16/SEW)*LMUL, which violates the LMUL=1 constraint at any SEW != 16. Gate
+// the pseudo with NotHasStrictLMUL so any instruction-selection path that
+// reaches this pseudo on a StrictLMUL target fails loudly at isel rather than
+// silently emitting code that traps at runtime.
+let Predicates = [HasVInstructions, NotHasStrictLMUL] in
 defm PseudoVRGATHEREI16 : VPseudoVGTR_EI16_VV;
+
+let Predicates = [HasVInstructions] in {
 
 //===----------------------------------------------------------------------===//
 // 16.5. Vector Compress Instruction
