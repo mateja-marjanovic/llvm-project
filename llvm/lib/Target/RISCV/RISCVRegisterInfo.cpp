@@ -452,14 +452,15 @@ void RISCVRegisterInfo::adjustReg(MachineBasicBlock &MBB,
 }
 
 static std::tuple<RISCVVType::VLMUL, const TargetRegisterClass &, unsigned>
-getSpillReloadInfo(unsigned NumRemaining, uint16_t RegEncoding, bool IsSpill) {
-  if (NumRemaining >= 8 && RegEncoding % 8 == 0)
+getSpillReloadInfo(unsigned NumRemaining, uint16_t RegEncoding, bool IsSpill,
+                   bool LMUL1Only) {
+  if (!LMUL1Only && NumRemaining >= 8 && RegEncoding % 8 == 0)
     return {RISCVVType::LMUL_8, RISCV::VRM8RegClass,
             IsSpill ? RISCV::VS8R_V : RISCV::VL8RE8_V};
-  if (NumRemaining >= 4 && RegEncoding % 4 == 0)
+  if (!LMUL1Only && NumRemaining >= 4 && RegEncoding % 4 == 0)
     return {RISCVVType::LMUL_4, RISCV::VRM4RegClass,
             IsSpill ? RISCV::VS4R_V : RISCV::VL4RE8_V};
-  if (NumRemaining >= 2 && RegEncoding % 2 == 0)
+  if (!LMUL1Only && NumRemaining >= 2 && RegEncoding % 2 == 0)
     return {RISCVVType::LMUL_2, RISCV::VRM2RegClass,
             IsSpill ? RISCV::VS2R_V : RISCV::VL2RE8_V};
   return {RISCVVType::LMUL_1, RISCV::VRRegClass,
@@ -477,6 +478,9 @@ void RISCVRegisterInfo::lowerSegmentSpillReload(MachineBasicBlock::iterator II,
   const RISCVSubtarget &STI = MF.getSubtarget<RISCVSubtarget>();
   const TargetInstrInfo *TII = STI.getInstrInfo();
   const TargetRegisterInfo *TRI = STI.getRegisterInfo();
+  // NS-CORE targets only support LMUL=1 whole-register spills, so never merge
+  // adjacent registers into a single LMUL>1 store/load.
+  bool LMUL1Only = STI.hasStrictLMUL() || STI.hasFractionalLMUL();
 
   auto ZvlssegInfo = RISCV::isRVVSpillForZvlsseg(II->getOpcode());
   unsigned NF = ZvlssegInfo->first;
@@ -501,7 +505,7 @@ void RISCVRegisterInfo::lowerSegmentSpillReload(MachineBasicBlock::iterator II,
   unsigned I = 0;
   while (I != NumRegs) {
     auto [LMulHandled, RegClass, Opcode] =
-        getSpillReloadInfo(NumRegs - I, RegEncoding, IsSpill);
+        getSpillReloadInfo(NumRegs - I, RegEncoding, IsSpill, LMUL1Only);
     auto [RegNumHandled, _] = RISCVVType::decodeVLMUL(LMulHandled);
     bool IsLast = I + RegNumHandled == NumRegs;
     if (PrevHandledNum) {
@@ -705,6 +709,9 @@ bool RISCVRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
   case RISCV::PseudoVSPILL6_M1:
   case RISCV::PseudoVSPILL7_M1:
   case RISCV::PseudoVSPILL8_M1:
+  case RISCV::PseudoVSPILL_VRM2:
+  case RISCV::PseudoVSPILL_VRM4:
+  case RISCV::PseudoVSPILL_VRM8:
     lowerSegmentSpillReload(II, /*IsSpill=*/true);
     return true;
   case RISCV::PseudoVRELOAD2_M1:
@@ -718,6 +725,9 @@ bool RISCVRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
   case RISCV::PseudoVRELOAD6_M1:
   case RISCV::PseudoVRELOAD7_M1:
   case RISCV::PseudoVRELOAD8_M1:
+  case RISCV::PseudoVRELOAD_VRM2:
+  case RISCV::PseudoVRELOAD_VRM4:
+  case RISCV::PseudoVRELOAD_VRM8:
     lowerSegmentSpillReload(II, /*IsSpill=*/false);
     return true;
   }

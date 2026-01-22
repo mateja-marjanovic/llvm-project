@@ -207,9 +207,19 @@ DemandedFields getDemanded(const MachineInstr &MI, const RISCVSubtarget *ST) {
   // provided we don't change the ratio.
   // Note: We assume that the instructions initial SEW is the EEW encoded
   // in the opcode.  This is asserted when constructing the VSETVLIInfo.
+  //
+  // On StrictLMUL/FractionalLMUL targets EMUL must be <= 1.  Since
+  // EMUL = LMUL * (EEW / SEW), we enforce SEW == EEW (so EMUL == LMUL <= 1)
+  // by demanding SEWEqual instead of SEWNone.  This forces the pass to insert
+  // a new vsetvli whenever the live SEW differs from EEW, preventing a
+  // situation such as vtype=e8,m1 followed by vse64.v (EMUL=8).
   if (RISCV::getEEWForLoadStore(MI)) {
-    Res.SEW = DemandedFields::SEWNone;
-    Res.LMUL = DemandedFields::LMULNone;
+    Res.SEW = (ST && (ST->hasStrictLMUL() || ST->hasFractionalLMUL()))
+                  ? DemandedFields::SEWEqual
+                  : DemandedFields::SEWNone;
+    Res.LMUL = (ST && (ST->hasStrictLMUL() || ST->hasFractionalLMUL()))
+                   ? DemandedFields::LMULLessThanOrEqualToM1
+                   : DemandedFields::LMULNone;
   }
 
   // Store instructions don't use the policy fields.
@@ -229,7 +239,9 @@ DemandedFields getDemanded(const MachineInstr &MI, const RISCVSubtarget *ST) {
 
   // For vmv.s.x and vfmv.s.f, there are only two behaviors, VL = 0 and VL > 0.
   if (RISCVInstrInfo::isScalarInsertInstr(MI)) {
-    Res.LMUL = DemandedFields::LMULNone;
+    Res.LMUL = (ST->hasStrictLMUL() || ST->hasFractionalLMUL())
+                   ? DemandedFields::LMULLessThanOrEqualToM1
+                   : DemandedFields::LMULNone;
     Res.SEWLMULRatio = false;
     Res.VLAny = false;
     // For vmv.s.x and vfmv.s.f, if the passthru is *undefined*, we don't
@@ -432,6 +444,19 @@ RISCVVSETVLIInfoAnalysis::computeInfoForInstr(const MachineInstr &MI) const {
   // A Log2SEW of 0 is an operation on mask registers only.
   unsigned SEW = Log2SEW ? 1 << Log2SEW : 8;
   assert(RISCVVType::isValidSEW(SEW) && "Unexpected SEW");
+
+  // For NS-CORE targets (Strict/Fractional LMUL) with mask-only ops
+  // (Log2SEW=0): mask logical ops like vmand.mm don't depend on LMUL, only VL.
+  // Safe to force M1 since these targets limit data vectors to M1.
+  // Note: we do NOT scale fractional LMUL here because changing SEW would
+  // alter the semantics of data operations (e.g. vslidedown element width).
+  // Fractional LMUL on explicit vsetvlis is handled separately by the
+  // post-pass VTYPE rewriting.
+  if ((ST->hasStrictLMUL() || ST->hasFractionalLMUL()) && !Log2SEW) {
+    auto [LMul, Fractional] = RISCVVType::decodeVLMUL(VLMul);
+    if (!Fractional && LMul > 1)
+      VLMul = RISCVVType::LMUL_1;
+  }
 
   if (RISCVII::hasTWidenOp(TSFlags)) {
     const MachineOperand &TWidenOp = getTWidenOp(MI);

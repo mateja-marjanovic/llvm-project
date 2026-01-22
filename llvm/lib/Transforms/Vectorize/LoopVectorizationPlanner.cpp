@@ -255,6 +255,26 @@ ElementCount VFSelectionContext::getMaximizedVFForTarget(
   auto MaxVectorElementCount = ElementCount::get(
       llvm::bit_floor(WidestRegister.getKnownMinValue() / WidestType),
       ComputeScalableMaxVF);
+
+  // For NS-CORE-V2, we set the MaxVectorElementCount so that the SmallestType
+  // multiplied with it is equal to 64. This is to ensure that the the smallest
+  // LMUL value an instruction could have is 1.
+  if (TTI.supportsStrictLMUL()) {
+    if (SmallestType > WidestType)
+      SmallestType = WidestType;
+    // MaxVectorElementCount can start at 0 (e.g. WidestType wider than the
+    // register), and dividing an EC of 1 by 2 also yields 0. Clamp to 1 so
+    // the growth loop below always has a nonzero coefficient to double,
+    // since 0 * SmallestType < 64 would otherwise never become false.
+    if (MaxVectorElementCount.getKnownMinValue() == 0)
+      MaxVectorElementCount = ElementCount::get(1, ComputeScalableMaxVF);
+    while (MaxVectorElementCount.getKnownMinValue() > 1 &&
+           MaxVectorElementCount.getKnownMinValue() * SmallestType > 64)
+      MaxVectorElementCount = MaxVectorElementCount.divideCoefficientBy(2);
+    while (MaxVectorElementCount.getKnownMinValue() * SmallestType < 64)
+      MaxVectorElementCount *= 2;
+  }
+
   MaxVectorElementCount = MinVF(MaxVectorElementCount, MaxSafeVF);
   LLVM_DEBUG(dbgs() << "LV: The Widest register safe to use is: "
                     << (MaxVectorElementCount * WidestType) << " bits.\n");
@@ -396,6 +416,61 @@ FixedScalableVFPair VFSelectionContext::computeFeasibleMaxVF(
     unsigned MaxTripCount, ElementCount UserVF, unsigned UserIC,
     bool FoldTailByMasking, bool RequiresScalarEpilogue) {
   auto [SmallestType, WidestType] = getSmallestAndWidestTypes();
+
+  // For StrictLMUL (V2, no fractional LMUL support), also consider induction
+  // variable types, including truncations of induction variables that the
+  // vectorizer will optimize into narrower vector inductions (see
+  // tryToOptimizeInductionTruncate). This keeps VF sized against the
+  // smallest type, since V2 cannot legalize anything below LMUL=1.
+  if (TTI.supportsStrictLMUL()) {
+    const DataLayout &DL = F.getDataLayout();
+    for (const auto &[Phi, ID] : Legal->getInductionVars()) {
+      if (ID.getKind() == InductionDescriptor::IK_IntInduction) {
+        unsigned IndWidth =
+            DL.getTypeSizeInBits(Phi->getType()).getFixedValue();
+        SmallestType = std::min(SmallestType, IndWidth);
+        // Also account for truncations of the induction variable, which
+        // will be lowered to narrower vector inductions (stepvectors).
+        for (User *U : Phi->users()) {
+          if (auto *Trunc = dyn_cast<TruncInst>(U)) {
+            unsigned TruncWidth =
+                DL.getTypeSizeInBits(Trunc->getType()).getFixedValue();
+            SmallestType = std::min(SmallestType, TruncWidth);
+          }
+        }
+      }
+    }
+  }
+
+  // For FractionalLMUL (V3, which can legalize below LMUL=1), size VF
+  // against the widest type instead: also account for the destination width
+  // of any integer extend inside the loop body. VF is otherwise sized only
+  // against the types seen at loads/stores/reductions (see
+  // collectElementTypesForWidening); an ordinary zext/sext of a per-lane
+  // value can still widen it past that budget once vectorized, producing a
+  // vector container above LMUL=1 with no vectorizer decision behind it.
+  // StrictLMUL (V2) keeps the smallest-type sizing above instead, since it
+  // cannot fall back to a fractional LMUL for the narrower types.
+  if (TTI.supportsFractionalLMUL()) {
+    const DataLayout &DL = F.getDataLayout();
+    for (BasicBlock *BB : TheLoop->blocks()) {
+      for (Instruction &I : *BB) {
+        if (!isa<ZExtInst>(I) && !isa<SExtInst>(I))
+          continue;
+        // Extends of values defined outside the loop are loop-invariant and
+        // won't be widened per-lane.
+        auto *Op = dyn_cast<Instruction>(I.getOperand(0));
+        if (!Op || !TheLoop->contains(Op))
+          continue;
+        Type *DstTy = I.getType();
+        if (!DstTy->isIntOrIntVectorTy())
+          continue;
+        unsigned DstWidth =
+            DL.getTypeSizeInBits(DstTy->getScalarType()).getFixedValue();
+        WidestType = std::max(WidestType, DstWidth);
+      }
+    }
+  }
 
   // Get the maximum safe dependence distance in bits computed by LAA.
   // It is computed by MaxVF * sizeOf(type) * 8, where type is taken from

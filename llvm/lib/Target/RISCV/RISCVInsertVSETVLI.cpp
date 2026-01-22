@@ -152,6 +152,38 @@ char &llvm::RISCVInsertVSETVLIID = RISCVInsertVSETVLI::ID;
 INITIALIZE_PASS(RISCVInsertVSETVLI, DEBUG_TYPE, RISCV_INSERT_VSETVLI_NAME,
                 false, false)
 
+// For NS-CORE targets (Strict/Fractional LMUL), adjust the VTYPE encoding to
+// use LMUL=M1 while preserving the SEW/LMUL ratio (so VLMAX is unchanged).
+// Falls back to the original encoding when no valid M1 SEW exists for the
+// ratio.  Rewrites any LMUL != 1 -- integer LMUL > 1 and fractional
+// (MF2/MF4/MF8) alike -- except on V3 (FractionalLMUL), which natively
+// supports fractional LMUL and keeps those encodings as-is.
+static unsigned adjustVTYPEForLMUL1(unsigned VType,
+                                    const RISCVSubtarget *ST) {
+  if (!ST->hasStrictLMUL() && !ST->hasFractionalLMUL())
+    return VType;
+  RISCVVType::VLMUL VLMul = RISCVVType::getVLMUL(VType);
+  if (VLMul == RISCVVType::LMUL_1)
+    return VType;
+  auto [LMul, Fractional] = RISCVVType::decodeVLMUL(VLMul);
+  // FractionalLMUL (V3) supports MF2/MF4/MF8 natively - keep those. StrictLMUL
+  // (V2) has no legal fractional LMUL at all: the vsetvli-level VTYPE is what
+  // this function rewrites, which is orthogonal to a single narrowing/
+  // widening instruction's own EMUL>1 on its wide operand (that's tolerated
+  // via the opcode's own defined semantics, not via the ambient vtype being
+  // fractional) -- so any fractional encoding seen here, from any producer,
+  // must still be rescaled to LMUL=1 on StrictLMUL targets.
+  if (Fractional && ST->hasFractionalLMUL())
+    return VType;
+  unsigned SEW = RISCVVType::getSEW(VType);
+  unsigned Ratio = RISCVVType::getSEWLMULRatio(SEW, VLMul);
+  if (!RISCVVType::isValidSEW(Ratio))
+    return VType;
+  return RISCVVType::encodeVTYPE(RISCVVType::LMUL_1, Ratio,
+                                 RISCVVType::isTailAgnostic(VType),
+                                 RISCVVType::isMaskAgnostic(VType));
+}
+
 void RISCVInsertVSETVLI::insertVSETVLI(MachineBasicBlock &MBB,
                                        MachineBasicBlock::iterator InsertPt,
                                        DebugLoc DL, const VSETVLIInfo &Info,
@@ -282,13 +314,22 @@ bool RISCVInsertVSETVLI::needVSETVLI(const DemandedFields &Used,
 // places.
 static VSETVLIInfo adjustIncoming(const VSETVLIInfo &PrevInfo,
                                   const VSETVLIInfo &NewInfo,
-                                  DemandedFields &Demanded) {
+                                  DemandedFields &Demanded,
+                                  const RISCVSubtarget *ST) {
   VSETVLIInfo Info = NewInfo;
 
   if (!Demanded.LMUL && !Demanded.SEWLMULRatio && PrevInfo.isKnown()) {
     if (auto NewVLMul = RISCVVType::getSameRatioLMUL(PrevInfo.getSEWLMULRatio(),
-                                                     Info.getSEW()))
-      Info.setVLMul(*NewVLMul);
+                                                     Info.getSEW())) {
+      // For NS-CORE targets, don't scale LMUL above M1 just to preserve the
+      // ratio. Prefer a clean M1 over eliminating a VL toggle. Fractional
+      // results are still allowed under FractionalLMUL.
+      bool LMUL1Only = ST->hasStrictLMUL() || ST->hasFractionalLMUL();
+      auto [NewLMul, NewFractional] = RISCVVType::decodeVLMUL(*NewVLMul);
+      bool NewIsAboveM1 = !NewFractional && NewLMul > 1;
+      if (!LMUL1Only || !NewIsAboveM1)
+        Info.setVLMul(*NewVLMul);
+    }
     Demanded.LMUL = DemandedFields::LMULEqual;
   }
 
@@ -302,7 +343,8 @@ void RISCVInsertVSETVLI::transferBefore(VSETVLIInfo &Info,
                                         const MachineInstr &MI) const {
   if (EnsureWholeVectorRegisterMoveValidVTYPE &&
       RISCV::isVectorCopy(ST->getRegisterInfo(), MI) &&
-      (!Info.isKnown() || Info.hasSEWLMULRatioOnly())) {
+      (!Info.isKnown() || Info.hasSEWLMULRatioOnly()) &&
+      !ST->hasStrictLMUL() && !ST->hasFractionalLMUL()) {
     // Use an arbitrary but valid AVL and VTYPE so vill will be cleared. It may
     // be coalesced into another vsetvli since we won't demand any fields.
     VSETVLIInfo NewInfo; // Need a new VSETVLIInfo to clear SEWLMULRatioOnly
@@ -327,7 +369,7 @@ void RISCVInsertVSETVLI::transferBefore(VSETVLIInfo &Info,
   if (!Info.isKnown())
     Info = NewInfo;
 
-  const VSETVLIInfo IncomingInfo = adjustIncoming(PrevInfo, NewInfo, Demanded);
+  const VSETVLIInfo IncomingInfo = adjustIncoming(PrevInfo, NewInfo, Demanded, ST);
 
   // If MI only demands that VL has the same zeroness, we only need to set the
   // AVL if the zeroness differs.  This removes a vsetvli entirely if the types
@@ -546,7 +588,8 @@ void RISCVInsertVSETVLI::emitVSETVLIs(MachineBasicBlock &MBB) {
     }
 
     if (EnsureWholeVectorRegisterMoveValidVTYPE &&
-        RISCV::isVectorCopy(ST->getRegisterInfo(), MI)) {
+        RISCV::isVectorCopy(ST->getRegisterInfo(), MI) &&
+        !ST->hasStrictLMUL() && !ST->hasFractionalLMUL()) {
       if (!PrevInfo.isCompatible(DemandedFields::all(), CurInfo, LIS)) {
         insertVSETVLI(MBB, MI, MI.getDebugLoc(), CurInfo, PrevInfo);
         PrefixTransparent = false;
@@ -1098,6 +1141,22 @@ bool RISCVInsertVSETVLI::runOnMachineFunction(MachineFunction &MF) {
     for (MachineBasicBlock &MBB : MF) {
       insertVSETMTK(MBB, VSETTM);
       insertVSETMTK(MBB, VSETTK);
+    }
+  }
+  // For NS-CORE targets, rewrite VSETVLI VTYPE encodings whose integer LMUL > 1
+  // to use M1 while preserving the SEW/LMUL ratio.  Fractional encodings are
+  // preserved for FractionalLMUL targets.  This runs after all dataflow phases
+  // so it doesn't interfere with the invariant checks.
+  if (ST->hasStrictLMUL() || ST->hasFractionalLMUL()) {
+    for (MachineBasicBlock &MBB : MF) {
+      for (MachineInstr &MI : MBB) {
+        if (!RISCVInstrInfo::isVectorConfigInstr(MI))
+          continue;
+        unsigned VType = MI.getOperand(2).getImm();
+        unsigned Adjusted = adjustVTYPEForLMUL1(VType, ST);
+        if (Adjusted != VType)
+          MI.getOperand(2).setImm(Adjusted);
+      }
     }
   }
 

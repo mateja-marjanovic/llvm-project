@@ -223,8 +223,11 @@ unsigned RISCVSubtarget::getMinRVVVectorSizeInBits() const {
 unsigned RISCVSubtarget::getMaxLMULForFixedLengthVectors() const {
   assert(hasVInstructions() &&
          "Tried to get vector length without Zve or V extension support!");
+  if (hasStrictLMUL() || hasFractionalLMUL())
+    return 1;
   return 8;
 }
+
 
 bool RISCVSubtarget::useRVVForFixedLengthVectors() const {
   return hasVInstructions() &&

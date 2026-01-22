@@ -865,6 +865,62 @@ public:
     return ScalarsPerVF->second.count(I);
   }
 
+  /// \returns True if \p I is a float<->float widening/narrowing cast
+  /// (fpext/fptrunc, i.e. vfwcvt.f.f.v / vfncvt.f.f.w) on a target that only
+  /// supports vector register groups at exactly LMUL=1 (StrictLMUL).
+  ///
+  /// Confirmed illegal on real NSCore v2 hardware, not just a theoretical
+  /// EMUL<=1 argument: 511.povray_r and 510.parest_r both trap with cause=2
+  /// (illegal instruction) and mtval exactly matching the raw encoding of
+  /// vfwcvt.f.f.v (0x4ae61857, Post_Pigment) and vfncvt.f.f.w (0x4a9a1557,
+  /// DataOut::build_some_patches) respectively - confirmed 2026-08-13.
+  ///
+  /// Deliberately scoped to ONLY fpext/fptrunc. Int<->fp conversions with a
+  /// size mismatch (sitofp/uitofp/fptosi/fptoui -> vfwcvt.f.x.v/vfwcvt.f.xu.v
+  /// / vfncvt.rtz.x.f.w/vfncvt.rtz.xu.f.w) and pure integer sext/zext/trunc
+  /// were previously included here too, on the theory that any EMUL=2/mf2
+  /// operand is equally illegal - but vfncvt.rtz.x.f.w/vfncvt.rtz.xu.f.w
+  /// appear (and run without faulting) in wrf_r, blender_r, cam4_r,
+  /// imagick_r, and roms_r, so that theory doesn't hold for those opcodes.
+  /// Only flag what's actually been shown to fault; don't scalarize
+  /// speculatively.
+  bool isIllegalStrictLMULWideningCast(Instruction *I) const {
+    if (!TTI.supportsStrictLMUL())
+      return false;
+    auto *CI = dyn_cast<CastInst>(I);
+    if (!CI)
+      return false;
+    switch (CI->getOpcode()) {
+    case Instruction::FPExt:
+    case Instruction::FPTrunc:
+      return true;
+    default:
+      return false;
+    }
+  }
+
+  /// \returns True if the loop contains any isIllegalStrictLMULWideningCast
+  /// instruction. Such a cast has no legal widened form on this target and
+  /// forcing just its own use-chain to scalarize (while leaving the rest of
+  /// the loop vectorized around it) runs into a wide variety of VPlan
+  /// invariants that assume nothing gets force-scalarized out from under
+  /// them - arithmetic widen recipes, reduction recipe construction, and the
+  /// legacy/VPlan cost-model agreement check have each broken in turn under
+  /// that approach. Rejecting vectorization of the whole loop instead is far
+  /// simpler and unconditionally correct: it falls back to the scalar code
+  /// that was always safe to run. Cached since this is VF-independent
+  /// (isIllegalStrictLMULWideningCast doesn't look at VF).
+  bool hasIllegalStrictLMULWideningCast() const {
+    if (!HasIllegalStrictLMULWideningCast) {
+      HasIllegalStrictLMULWideningCast = any_of(TheLoop->blocks(), [&](BasicBlock *BB) {
+        return any_of(*BB, [&](Instruction &I) {
+          return isIllegalStrictLMULWideningCast(&I);
+        });
+      });
+    }
+    return *HasIllegalStrictLMULWideningCast;
+  }
+
   /// \returns True if instruction \p I can be truncated to a smaller bitwidth
   /// for vectorization factor \p VF.
   bool canTruncateToMinimalBitwidth(Instruction *I, ElementCount VF) const {
@@ -1402,6 +1458,10 @@ private:
 
   /// If partial alias masking is enabled/disabled or not decided.
   AliasMaskingStatus PartialAliasMaskingStatus = AliasMaskingStatus::NotDecided;
+
+  /// Cache for hasIllegalStrictLMULWideningCast(); VF-independent, computed
+  /// once per loop.
+  mutable std::optional<bool> HasIllegalStrictLMULWideningCast;
 
   /// A map holding scalar costs for different vectorization factors. The
   /// presence of a cost for an instruction in the mapping indicates that the
@@ -2928,6 +2988,30 @@ LoopVectorizationCostModel::computeMaxVF(ElementCount UserVF, unsigned UserIC) {
     if (PartialAliasMaskingStatus == AliasMaskingStatus::NotDecided)
       PartialAliasMaskingStatus = AliasMaskingStatus::Disabled;
   });
+
+  // A widening/narrowing cast illegal on StrictLMUL targets (see
+  // isIllegalStrictLMULWideningCast) has no legal widened form here. Forcing
+  // just its own use-chain to scalarize while leaving the rest of the loop
+  // vectorized runs into a wide variety of VPlan invariants that assume
+  // nothing gets force-scalarized out from under them (arithmetic widen
+  // recipes, reduction recipe construction, and the legacy/VPlan cost-model
+  // agreement check have each broken in turn under that approach). Rejecting
+  // vectorization of the whole loop is simpler and unconditionally correct:
+  // it falls back to the scalar code that was always safe to run.
+  //
+  // Confirmed on real NSCore v2 hardware (not just QEMU): 511.povray_r and
+  // 510.parest_r both trapped with cause=2 (illegal instruction), badaddr
+  // holding the exact encoding of vfwcvt.f.f.v / vfncvt.f.f.w respectively -
+  // the same instructions QEMU faulted on. This is a genuine hardware
+  // limitation, not a QEMU modeling bug.
+  if (hasIllegalStrictLMULWideningCast()) {
+    reportVectorizationFailure(
+        "Loop contains a widening/narrowing cast illegal on StrictLMUL "
+        "targets",
+        "cast has no legal widened form on this target",
+        "IllegalStrictLMULWideningCast", ORE, TheLoop);
+    return FixedScalableVFPair::getNone();
+  }
 
   // For outer loops, use simple type-based heuristic VF. No cost model or
   // memory dependence analysis is available.
@@ -6263,6 +6347,9 @@ bool VPRecipeBuilder::shouldWiden(Instruction *I, VFRange &Range) const {
          "Instruction should have been handled earlier");
   // Instruction should be widened, unless it is scalar after vectorization,
   // scalarization is profitable or it is predicated.
+  // Note: loops containing an isIllegalStrictLMULWideningCast instruction
+  // (see LoopVectorizationCostModel::computeMaxVF) are rejected wholesale
+  // before ever reaching VPlan construction, so I is never such a cast here.
   auto WillScalarize = [this, I](ElementCount VF) -> bool {
     return CM.isScalarAfterVectorization(I, VF) ||
            CM.isProfitableToScalarize(I, VF) ||

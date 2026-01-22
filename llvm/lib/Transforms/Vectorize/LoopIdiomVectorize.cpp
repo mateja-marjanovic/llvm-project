@@ -204,6 +204,13 @@ PreservedAnalyses LoopIdiomVectorizePass::run(Loop &L, LoopAnalysisManager &AM,
   if (ByteCmpVF.getNumOccurrences())
     BCVF = ByteCmpVF;
 
+  if (AR.TTI.supportsStrictLMUL() || AR.TTI.supportsFractionalLMUL()) {
+    TypeSize RegWidth =
+        AR.TTI.getRegisterBitWidth(TargetTransformInfo::RGK_ScalableVector);
+    if (unsigned MaxVF = RegWidth.getKnownMinValue() / 8)
+      BCVF = std::min(BCVF, MaxVF);
+  }
+
   Function &F = *L.getHeader()->getParent();
   auto &FAMP = AM.getResult<FunctionAnalysisManagerLoopProxy>(L, AR);
   auto *ORE = FAMP.getCachedResult<OptimizationRemarkEmitterAnalysis>(F);
@@ -1106,10 +1113,16 @@ bool LoopIdiomVectorize::recognizeFindFirstByte() {
   if (!CharTy->isIntegerTy() || LoadNeedle->getType() != CharTy)
     return false;
 
-  // Pick the vectorisation factor based on CharTy, work out the cost of the
-  // match intrinsic and decide if we should use it.
+  // Pick the vectorisation factor based on CharTy.
   // Note: For the time being we assume 128-bit vectors.
   unsigned VF = 128 / CharTy->getIntegerBitWidth();
+  if (TTI->supportsStrictLMUL() || TTI->supportsFractionalLMUL()) {
+    TypeSize RegWidth =
+        TTI->getRegisterBitWidth(TargetTransformInfo::RGK_ScalableVector);
+    if (unsigned MaxVF =
+            RegWidth.getKnownMinValue() / CharTy->getIntegerBitWidth())
+      VF = std::min(VF, MaxVF);
+  }
   SmallVector<Type *> Args = {
       ScalableVectorType::get(CharTy, VF), FixedVectorType::get(CharTy, VF),
       ScalableVectorType::get(Type::getInt1Ty(Ctx), VF)};
