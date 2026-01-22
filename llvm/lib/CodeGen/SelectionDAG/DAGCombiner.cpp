@@ -22268,6 +22268,15 @@ bool DAGCombiner::mergeConsecutiveStores(StoreSDNode *St) {
     if (NumConsecutiveStores == 0)
       return MadeChange;
 
+    // Check for RISC-V with strict LMUL (nextsilicon-ns-core-v2 CPU).
+    // Exact-match the CPU name so future RISC-V CPUs whose name happens to
+    // contain this substring don't silently inherit the guard.
+    const TargetSubtargetInfo &STI = DAG.getSubtarget();
+    if (STI.getTargetTriple().isRISCV() &&
+        STI.getCPU() == "nextsilicon-ns-core-v2" &&
+        MemVT.getSizeInBits().getKnownMinValue() * NumConsecutiveStores < 64)
+      return false;
+
     // We have at least 2 consecutive stores. Try to merge them.
     assert(NumConsecutiveStores >= 2 && "Expected at least 2 stores");
     switch (StoreSrc) {

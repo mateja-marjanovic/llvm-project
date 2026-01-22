@@ -51,6 +51,9 @@ bool RISCVTargetLowering::isLegalInterleavedAccessType(
 
   // Need to make sure that EMUL * NFIELDS ≤ 8
   auto [LMUL, Fractional] = RISCVVType::decodeVLMUL(getLMUL(ContainerVT));
+  // NS-CORE targets do not support segment load/store instructions.
+  if (Subtarget.hasStrictLMUL() || Subtarget.hasFractionalLMUL())
+    return false;
   if (Fractional)
     return true;
   return Factor * LMUL <= 8;

@@ -283,6 +283,12 @@ public:
     if (!ST->hasVInstructions())
       return false;
 
+    // Indexed loads/stores use pointer-width indices. On RV64 with StrictLMUL,
+    // this means EEW=64 for the index, giving EMUL = (64/SEW)*1 > 1 whenever
+    // SEW < 64, which violates the LMUL=1 constraint.
+    if (ST->hasStrictLMUL())
+      return false;
+
     EVT DataTypeVT = TLI->getValueType(DL, DataType);
 
     // Only support fixed vectors if we know the minimum vector size.

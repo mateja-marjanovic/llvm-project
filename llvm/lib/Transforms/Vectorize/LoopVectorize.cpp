@@ -1053,6 +1053,62 @@ public:
     return ScalarsPerVF->second.count(I);
   }
 
+  /// \returns True if \p I is a float<->float widening/narrowing cast
+  /// (fpext/fptrunc, i.e. vfwcvt.f.f.v / vfncvt.f.f.w) on a target that only
+  /// supports vector register groups at exactly LMUL=1 (StrictLMUL).
+  ///
+  /// Confirmed illegal on real NSCore v2 hardware, not just a theoretical
+  /// EMUL<=1 argument: 511.povray_r and 510.parest_r both trap with cause=2
+  /// (illegal instruction) and mtval exactly matching the raw encoding of
+  /// vfwcvt.f.f.v (0x4ae61857, Post_Pigment) and vfncvt.f.f.w (0x4a9a1557,
+  /// DataOut::build_some_patches) respectively - confirmed 2026-08-13.
+  ///
+  /// Deliberately scoped to ONLY fpext/fptrunc. Int<->fp conversions with a
+  /// size mismatch (sitofp/uitofp/fptosi/fptoui -> vfwcvt.f.x.v/vfwcvt.f.xu.v
+  /// / vfncvt.rtz.x.f.w/vfncvt.rtz.xu.f.w) and pure integer sext/zext/trunc
+  /// were previously included here too, on the theory that any EMUL=2/mf2
+  /// operand is equally illegal - but vfncvt.rtz.x.f.w/vfncvt.rtz.xu.f.w
+  /// appear (and run without faulting) in wrf_r, blender_r, cam4_r,
+  /// imagick_r, and roms_r, so that theory doesn't hold for those opcodes.
+  /// Only flag what's actually been shown to fault; don't scalarize
+  /// speculatively.
+  bool isIllegalStrictLMULWideningCast(Instruction *I) const {
+    if (!TTI.supportsStrictLMUL())
+      return false;
+    auto *CI = dyn_cast<CastInst>(I);
+    if (!CI)
+      return false;
+    switch (CI->getOpcode()) {
+    case Instruction::FPExt:
+    case Instruction::FPTrunc:
+      return true;
+    default:
+      return false;
+    }
+  }
+
+  /// \returns True if the loop contains any isIllegalStrictLMULWideningCast
+  /// instruction. Such a cast has no legal widened form on this target and
+  /// forcing just its own use-chain to scalarize (while leaving the rest of
+  /// the loop vectorized around it) runs into a wide variety of VPlan
+  /// invariants that assume nothing gets force-scalarized out from under
+  /// them - arithmetic widen recipes, reduction recipe construction, and the
+  /// legacy/VPlan cost-model agreement check have each broken in turn under
+  /// that approach. Rejecting vectorization of the whole loop instead is far
+  /// simpler and unconditionally correct: it falls back to the scalar code
+  /// that was always safe to run. Cached since this is VF-independent
+  /// (isIllegalStrictLMULWideningCast doesn't look at VF).
+  bool hasIllegalStrictLMULWideningCast() const {
+    if (!HasIllegalStrictLMULWideningCast) {
+      HasIllegalStrictLMULWideningCast = any_of(TheLoop->blocks(), [&](BasicBlock *BB) {
+        return any_of(*BB, [&](Instruction &I) {
+          return isIllegalStrictLMULWideningCast(&I);
+        });
+      });
+    }
+    return *HasIllegalStrictLMULWideningCast;
+  }
+
   /// \returns True if instruction \p I can be truncated to a smaller bitwidth
   /// for vectorization factor \p VF.
   bool canTruncateToMinimalBitwidth(Instruction *I, ElementCount VF) const {
@@ -1585,6 +1641,10 @@ private:
 
   /// true if scalable vectorization is supported and enabled.
   std::optional<bool> IsScalableVectorizationAllowed;
+
+  /// Cache for hasIllegalStrictLMULWideningCast(); VF-independent, computed
+  /// once per loop.
+  mutable std::optional<bool> HasIllegalStrictLMULWideningCast;
 
   /// Maximum safe number of elements to be processed per vector iteration,
   /// which do not prevent store-load forwarding and are safe with regard to the
@@ -3478,6 +3538,11 @@ bool LoopVectorizationCostModel::isScalableVectorizationAllowed() {
     return false;
   }
 
+  // Note: loops containing a widening/narrowing cast illegal on StrictLMUL
+  // targets (see isIllegalStrictLMULWideningCast) are rejected wholesale in
+  // computeMaxVF, before scalable vectorization is even considered, so no
+  // separate check is needed here.
+
   if (!Legal->isSafeForAnyVectorWidth() && !getMaxVScale(*TheFunction, TTI)) {
     reportVectorizationInfo("The target does not provide maximum vscale value "
                             "for safe distance analysis.",
@@ -3517,6 +3582,60 @@ FixedScalableVFPair LoopVectorizationCostModel::computeFeasibleMaxVF(
   MinBWs = computeMinimumValueSizes(TheLoop->getBlocks(), *DB, &TTI);
   unsigned SmallestType, WidestType;
   std::tie(SmallestType, WidestType) = getSmallestAndWidestTypes();
+
+  // For StrictLMUL (V2, no fractional LMUL support), also consider induction
+  // variable types, including truncations of induction variables that the
+  // vectorizer will optimize into narrower vector inductions (see
+  // tryToOptimizeInductionTruncate). This keeps VF sized against the
+  // smallest type, since V2 cannot legalize anything below LMUL=1.
+  if (TTI.supportsStrictLMUL()) {
+    const DataLayout &DL = TheFunction->getDataLayout();
+    for (const auto &[Phi, ID] : Legal->getInductionVars()) {
+      if (ID.getKind() == InductionDescriptor::IK_IntInduction) {
+        unsigned IndWidth = DL.getTypeSizeInBits(Phi->getType()).getFixedValue();
+        SmallestType = std::min(SmallestType, IndWidth);
+        // Also account for truncations of the induction variable, which
+        // will be lowered to narrower vector inductions (stepvectors).
+        for (User *U : Phi->users()) {
+          if (auto *Trunc = dyn_cast<TruncInst>(U)) {
+            unsigned TruncWidth =
+                DL.getTypeSizeInBits(Trunc->getType()).getFixedValue();
+            SmallestType = std::min(SmallestType, TruncWidth);
+          }
+        }
+      }
+    }
+  }
+
+  // For FractionalLMUL (V3, which can legalize below LMUL=1), size VF
+  // against the widest type instead: also account for the destination width
+  // of any integer extend inside the loop body. VF is otherwise sized only
+  // against the types seen at loads/stores/reductions (see
+  // collectElementTypesForWidening); an ordinary zext/sext of a per-lane
+  // value can still widen it past that budget once vectorized, producing a
+  // vector container above LMUL=1 with no vectorizer decision behind it.
+  // StrictLMUL (V2) keeps the smallest-type sizing above instead, since it
+  // cannot fall back to a fractional LMUL for the narrower types.
+  if (TTI.supportsFractionalLMUL()) {
+    const DataLayout &DL = TheFunction->getDataLayout();
+    for (BasicBlock *BB : TheLoop->blocks()) {
+      for (Instruction &I : *BB) {
+        if (!isa<ZExtInst>(I) && !isa<SExtInst>(I))
+          continue;
+        // Extends of values defined outside the loop are loop-invariant and
+        // won't be widened per-lane.
+        auto *Op = dyn_cast<Instruction>(I.getOperand(0));
+        if (!Op || !TheLoop->contains(Op))
+          continue;
+        Type *DstTy = I.getType();
+        if (!DstTy->isIntOrIntVectorTy())
+          continue;
+        unsigned DstWidth =
+            DL.getTypeSizeInBits(DstTy->getScalarType()).getFixedValue();
+        WidestType = std::max(WidestType, DstWidth);
+      }
+    }
+  }
 
   // Get the maximum safe dependence distance in bits computed by LAA.
   // It is computed by MaxVF * sizeOf(type) * 8, where type is taken from
@@ -3626,6 +3745,30 @@ FixedScalableVFPair LoopVectorizationCostModel::computeFeasibleMaxVF(
 
 FixedScalableVFPair
 LoopVectorizationCostModel::computeMaxVF(ElementCount UserVF, unsigned UserIC) {
+  // A widening/narrowing cast illegal on StrictLMUL targets (see
+  // isIllegalStrictLMULWideningCast) has no legal widened form here. Forcing
+  // just its own use-chain to scalarize while leaving the rest of the loop
+  // vectorized runs into a wide variety of VPlan invariants that assume
+  // nothing gets force-scalarized out from under them (arithmetic widen
+  // recipes, reduction recipe construction, and the legacy/VPlan cost-model
+  // agreement check have each broken in turn under that approach). Rejecting
+  // vectorization of the whole loop is simpler and unconditionally correct:
+  // it falls back to the scalar code that was always safe to run.
+  //
+  // Confirmed on real NSCore v2 hardware (not just QEMU): 511.povray_r and
+  // 510.parest_r both trapped with cause=2 (illegal instruction), badaddr
+  // holding the exact encoding of vfwcvt.f.f.v / vfncvt.f.f.w respectively -
+  // the same instructions QEMU faulted on. This is a genuine hardware
+  // limitation, not a QEMU modeling bug.
+  if (hasIllegalStrictLMULWideningCast()) {
+    reportVectorizationFailure(
+        "Loop contains a widening/narrowing cast illegal on StrictLMUL "
+        "targets",
+        "cast has no legal widened form on this target",
+        "IllegalStrictLMULWideningCast", ORE, TheLoop);
+    return FixedScalableVFPair::getNone();
+  }
+
   if (Legal->getRuntimePointerChecking()->Need && TTI.hasBranchDivergence()) {
     // TODO: It may be useful to do since it's still likely to be dynamically
     // uniform if the target can skip.
@@ -3866,6 +4009,26 @@ ElementCount LoopVectorizationCostModel::getMaximizedVFForTarget(
   auto MaxVectorElementCount = ElementCount::get(
       llvm::bit_floor(WidestRegister.getKnownMinValue() / WidestType),
       ComputeScalableMaxVF);
+
+  // For NS-CORE-V2, we set the MaxVectorElementCount so that the SmallestType
+  // multiplied with it is equal to 64. This is to ensure that the the smallest
+  // LMUL value an instruction could have is 1.
+  if (TTI.supportsStrictLMUL()) {
+    if (SmallestType > WidestType)
+      SmallestType = WidestType;
+    // MaxVectorElementCount can start at 0 (e.g. WidestType wider than the
+    // register), and dividing an EC of 1 by 2 also yields 0. Clamp to 1 so
+    // the growth loop below always has a nonzero coefficient to double,
+    // since 0 * SmallestType < 64 would otherwise never become false.
+    if (MaxVectorElementCount.getKnownMinValue() == 0)
+      MaxVectorElementCount = ElementCount::get(1, ComputeScalableMaxVF);
+    while (MaxVectorElementCount.getKnownMinValue() > 1 &&
+           MaxVectorElementCount.getKnownMinValue() * SmallestType > 64)
+      MaxVectorElementCount = MaxVectorElementCount.divideCoefficientBy(2);
+    while (MaxVectorElementCount.getKnownMinValue() * SmallestType < 64)
+      MaxVectorElementCount *= 2;
+  }
+
   MaxVectorElementCount = MinVF(MaxVectorElementCount, MaxSafeVF);
   LLVM_DEBUG(dbgs() << "LV: The Widest register safe to use is: "
                     << (MaxVectorElementCount * WidestType) << " bits.\n");
@@ -7866,6 +8029,9 @@ bool VPRecipeBuilder::shouldWiden(Instruction *I, VFRange &Range) const {
          !isa<StoreInst>(I) && "Instruction should have been handled earlier");
   // Instruction should be widened, unless it is scalar after vectorization,
   // scalarization is profitable or it is predicated.
+  // Note: loops containing an isIllegalStrictLMULWideningCast instruction
+  // (see LoopVectorizationCostModel::computeMaxVF) are rejected wholesale
+  // before ever reaching VPlan construction, so I is never such a cast here.
   auto WillScalarize = [this, I](ElementCount VF) -> bool {
     return CM.isScalarAfterVectorization(I, VF) ||
            CM.isProfitableToScalarize(I, VF) ||

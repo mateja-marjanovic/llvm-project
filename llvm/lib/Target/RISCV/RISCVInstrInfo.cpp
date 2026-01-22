@@ -378,6 +378,45 @@ static bool isConvertibleToVMV_V_V(const RISCVSubtarget &STI,
   return false;
 }
 
+bool RISCVInstrInfo::expandPostRAPseudo(MachineInstr &MI) const {
+  // REG_SEQUENCE instructions are created by loadRegFromStackSlot for
+  // vector register group reloads on StrictLMUL/FractionalLMUL (NS-CORE)
+  // targets specifically -- see the LMUL1Only path there. They are normally
+  // eliminated before register allocation, but since we create them during
+  // spilling (which happens during register allocation), they survive to
+  // this point with physical registers. Expand them into individual
+  // VMV1R_V copies here. We cannot use copyPhysReg because it calls
+  // isConvertibleToVMV_V_V which asserts the insertion point is a COPY
+  // instruction. Gated to NS-CORE targets since no other target constructs
+  // a REG_SEQUENCE this late.
+  if (!(STI.hasStrictLMUL() || STI.hasFractionalLMUL()) ||
+      MI.getOpcode() != TargetOpcode::REG_SEQUENCE)
+    return false;
+
+  MachineBasicBlock &MBB = *MI.getParent();
+  MachineFunction &MF = *MBB.getParent();
+  const TargetRegisterInfo *TRI = MF.getSubtarget().getRegisterInfo();
+  Register DstReg = MI.getOperand(0).getReg();
+
+  // REG_SEQUENCE operands are pairs: (SrcReg, SubIdx), starting at operand 1.
+  for (unsigned i = 1, e = MI.getNumOperands(); i < e; i += 2) {
+    Register SrcReg = MI.getOperand(i).getReg();
+    unsigned SubIdx = MI.getOperand(i + 1).getImm();
+    Register DstSubReg = TRI->getSubReg(DstReg, SubIdx);
+
+    // Skip identity copies where the source is already in the right place.
+    if (SrcReg == DstSubReg)
+      continue;
+
+    // Emit a whole-register move for this VR subregister.
+    BuildMI(MBB, MI, MI.getDebugLoc(), get(RISCV::VMV1R_V), DstSubReg)
+        .addReg(SrcReg, getKillRegState(MI.getOperand(i).isKill()));
+  }
+
+  MI.eraseFromParent();
+  return true;
+}
+
 void RISCVInstrInfo::copyPhysRegVector(
     MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
     const DebugLoc &DL, MCRegister DstReg, MCRegister SrcReg, bool KillSrc,
@@ -385,6 +424,12 @@ void RISCVInstrInfo::copyPhysRegVector(
   const TargetRegisterInfo *TRI = STI.getRegisterInfo();
   RISCVVType::VLMUL LMul = RISCVRI::getLMul(RegClass->TSFlags);
   unsigned NF = RISCVRI::getNF(RegClass->TSFlags);
+  // NS-CORE targets only support single-register vmv1r.v; a vmv2r.v/vmv4r.v/
+  // vmv8r.v addresses more than one architectural vector register in a
+  // single instruction, which is illegal there just like the whole-register
+  // memory ops (see storeRegToStackSlot/loadRegFromStackSlot). Force
+  // register-tuple copies down to LMUL1 copying below.
+  bool LMUL1Only = STI.hasStrictLMUL() || STI.hasFractionalLMUL();
 
   uint16_t SrcEncoding = TRI->getEncodingValue(SrcReg);
   uint16_t DstEncoding = TRI->getEncodingValue(DstReg);
@@ -412,15 +457,15 @@ void RISCVInstrInfo::copyPhysRegVector(
       // DstEncoding and SrcEncoding should be >= LMUL value we try to use to
       // avoid clobbering.
       uint16_t Diff = DstEncoding - SrcEncoding;
-      if (I + 8 <= NumRegs && Diff >= 8 && SrcEncoding % 8 == 7 &&
+      if (!LMUL1Only && I + 8 <= NumRegs && Diff >= 8 && SrcEncoding % 8 == 7 &&
           DstEncoding % 8 == 7)
         return {RISCVVType::LMUL_8, RISCV::VRM8RegClass, RISCV::VMV8R_V,
                 RISCV::PseudoVMV_V_V_M8, RISCV::PseudoVMV_V_I_M8};
-      if (I + 4 <= NumRegs && Diff >= 4 && SrcEncoding % 4 == 3 &&
+      if (!LMUL1Only && I + 4 <= NumRegs && Diff >= 4 && SrcEncoding % 4 == 3 &&
           DstEncoding % 4 == 3)
         return {RISCVVType::LMUL_4, RISCV::VRM4RegClass, RISCV::VMV4R_V,
                 RISCV::PseudoVMV_V_V_M4, RISCV::PseudoVMV_V_I_M4};
-      if (I + 2 <= NumRegs && Diff >= 2 && SrcEncoding % 2 == 1 &&
+      if (!LMUL1Only && I + 2 <= NumRegs && Diff >= 2 && SrcEncoding % 2 == 1 &&
           DstEncoding % 2 == 1)
         return {RISCVVType::LMUL_2, RISCV::VRM2RegClass, RISCV::VMV2R_V,
                 RISCV::PseudoVMV_V_V_M2, RISCV::PseudoVMV_V_I_M2};
@@ -431,13 +476,13 @@ void RISCVInstrInfo::copyPhysRegVector(
 
     // For forward copying, if source register encoding and destination register
     // encoding are aligned to 8/4/2, we can do a LMUL8/4/2 copying.
-    if (I + 8 <= NumRegs && SrcEncoding % 8 == 0 && DstEncoding % 8 == 0)
+    if (!LMUL1Only && I + 8 <= NumRegs && SrcEncoding % 8 == 0 && DstEncoding % 8 == 0)
       return {RISCVVType::LMUL_8, RISCV::VRM8RegClass, RISCV::VMV8R_V,
               RISCV::PseudoVMV_V_V_M8, RISCV::PseudoVMV_V_I_M8};
-    if (I + 4 <= NumRegs && SrcEncoding % 4 == 0 && DstEncoding % 4 == 0)
+    if (!LMUL1Only && I + 4 <= NumRegs && SrcEncoding % 4 == 0 && DstEncoding % 4 == 0)
       return {RISCVVType::LMUL_4, RISCV::VRM4RegClass, RISCV::VMV4R_V,
               RISCV::PseudoVMV_V_V_M4, RISCV::PseudoVMV_V_I_M4};
-    if (I + 2 <= NumRegs && SrcEncoding % 2 == 0 && DstEncoding % 2 == 0)
+    if (!LMUL1Only && I + 2 <= NumRegs && SrcEncoding % 2 == 0 && DstEncoding % 2 == 0)
       return {RISCVVType::LMUL_2, RISCV::VRM2RegClass, RISCV::VMV2R_V,
               RISCV::PseudoVMV_V_V_M2, RISCV::PseudoVMV_V_I_M2};
     // Or we should do LMUL1 copying.
@@ -649,6 +694,8 @@ void RISCVInstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB,
   MachineFunction *MF = MBB.getParent();
   MachineFrameInfo &MFI = MF->getFrameInfo();
 
+  bool LMUL1Only = STI.hasStrictLMUL() || STI.hasFractionalLMUL();
+
   unsigned Opcode;
   if (RISCV::GPRRegClass.hasSubClassEq(RC)) {
     Opcode = TRI->getRegSizeInBits(RISCV::GPRRegClass) == 32 ?
@@ -666,13 +713,17 @@ void RISCVInstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB,
   } else if (RISCV::FPR64RegClass.hasSubClassEq(RC)) {
     Opcode = RISCV::FSD;
   } else if (RISCV::VRRegClass.hasSubClassEq(RC)) {
-    Opcode = RISCV::VS1R_V;
+    // NS-CORE targets do not implement whole-register memory ops
+    // (vsNr.v/vlNre*.v all trap as illegal instructions). Use the unit-stride
+    // PseudoVSE8_V_M1 pseudo instead; RISCVInsertVSETVLI inserts the matching
+    // `vsetvli zero, zero, e8, m1, ta, ma` ahead of it.
+    Opcode = LMUL1Only ? RISCV::PseudoVSE8_V_M1 : RISCV::VS1R_V;
   } else if (RISCV::VRM2RegClass.hasSubClassEq(RC)) {
-    Opcode = RISCV::VS2R_V;
+    Opcode = LMUL1Only ? RISCV::PseudoVSPILL_VRM2 : RISCV::VS2R_V;
   } else if (RISCV::VRM4RegClass.hasSubClassEq(RC)) {
-    Opcode = RISCV::VS4R_V;
+    Opcode = LMUL1Only ? RISCV::PseudoVSPILL_VRM4 : RISCV::VS4R_V;
   } else if (RISCV::VRM8RegClass.hasSubClassEq(RC)) {
-    Opcode = RISCV::VS8R_V;
+    Opcode = LMUL1Only ? RISCV::PseudoVSPILL_VRM8 : RISCV::VS8R_V;
   } else if (RISCV::VRN2M1RegClass.hasSubClassEq(RC))
     Opcode = RISCV::PseudoVSPILL2_M1;
   else if (RISCV::VRN2M2RegClass.hasSubClassEq(RC))
@@ -704,11 +755,23 @@ void RISCVInstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB,
         TypeSize::getScalable(MFI.getObjectSize(FI)), MFI.getObjectAlign(FI));
 
     MFI.setStackID(FI, TargetStackID::ScalableVector);
-    BuildMI(MBB, I, DebugLoc(), get(Opcode))
-        .addReg(SrcReg, getKillRegState(IsKill))
-        .addFrameIndex(FI)
-        .addMemOperand(MMO)
-        .setMIFlag(Flags);
+    if (Opcode == RISCV::PseudoVSE8_V_M1) {
+      // PseudoVSE8_V_M1 needs (rd, rs1, vl, sew) - VL = VLMAX, SEW = 3
+      // (log2 of 8). InsertVSETVLI inserts the vsetvli before this.
+      BuildMI(MBB, I, DebugLoc(), get(Opcode))
+          .addReg(SrcReg, getKillRegState(IsKill))
+          .addFrameIndex(FI)
+          .addImm(RISCV::VLMaxSentinel)
+          .addImm(Log2_64(8))
+          .addMemOperand(MMO)
+          .setMIFlag(Flags);
+    } else {
+      BuildMI(MBB, I, DebugLoc(), get(Opcode))
+          .addReg(SrcReg, getKillRegState(IsKill))
+          .addFrameIndex(FI)
+          .addMemOperand(MMO)
+          .setMIFlag(Flags);
+    }
     NumVRegSpilled += TRI->getRegSizeInBits(*RC) / RISCV::RVVBitsPerBlock;
   } else {
     MachineMemOperand *MMO = MF->getMachineMemOperand(
@@ -733,6 +796,8 @@ void RISCVInstrInfo::loadRegFromStackSlot(
   DebugLoc DL =
       Flags & MachineInstr::FrameDestroy ? MBB.findDebugLoc(I) : DebugLoc();
 
+  bool LMUL1Only = STI.hasStrictLMUL() || STI.hasFractionalLMUL();
+
   unsigned Opcode;
   if (RISCV::GPRRegClass.hasSubClassEq(RC)) {
     Opcode = TRI->getRegSizeInBits(RISCV::GPRRegClass) == 32 ?
@@ -750,13 +815,14 @@ void RISCVInstrInfo::loadRegFromStackSlot(
   } else if (RISCV::FPR64RegClass.hasSubClassEq(RC)) {
     Opcode = RISCV::FLD;
   } else if (RISCV::VRRegClass.hasSubClassEq(RC)) {
-    Opcode = RISCV::VL1RE8_V;
+    // See storeRegToStackSlot - whole-register loads trap on NSCore targets.
+    Opcode = LMUL1Only ? RISCV::PseudoVLE8_V_M1 : RISCV::VL1RE8_V;
   } else if (RISCV::VRM2RegClass.hasSubClassEq(RC)) {
-    Opcode = RISCV::VL2RE8_V;
+    Opcode = LMUL1Only ? RISCV::PseudoVRELOAD_VRM2 : RISCV::VL2RE8_V;
   } else if (RISCV::VRM4RegClass.hasSubClassEq(RC)) {
-    Opcode = RISCV::VL4RE8_V;
+    Opcode = LMUL1Only ? RISCV::PseudoVRELOAD_VRM4 : RISCV::VL4RE8_V;
   } else if (RISCV::VRM8RegClass.hasSubClassEq(RC)) {
-    Opcode = RISCV::VL8RE8_V;
+    Opcode = LMUL1Only ? RISCV::PseudoVRELOAD_VRM8 : RISCV::VL8RE8_V;
   } else if (RISCV::VRN2M1RegClass.hasSubClassEq(RC))
     Opcode = RISCV::PseudoVRELOAD2_M1;
   else if (RISCV::VRN2M2RegClass.hasSubClassEq(RC))
@@ -788,10 +854,24 @@ void RISCVInstrInfo::loadRegFromStackSlot(
         TypeSize::getScalable(MFI.getObjectSize(FI)), MFI.getObjectAlign(FI));
 
     MFI.setStackID(FI, TargetStackID::ScalableVector);
-    BuildMI(MBB, I, DL, get(Opcode), DstReg)
-        .addFrameIndex(FI)
-        .addMemOperand(MMO)
-        .setMIFlag(Flags);
+    if (Opcode == RISCV::PseudoVLE8_V_M1) {
+      // PseudoVLE8_V_M1 needs (rd, passthru, rs1, vl, sew, policy). The
+      // passthru is tied to rd; we're overwriting the whole register so it's
+      // undef. InsertVSETVLI emits the matching vsetvli before this.
+      BuildMI(MBB, I, DL, get(Opcode), DstReg)
+          .addReg(DstReg, RegState::Undef)
+          .addFrameIndex(FI)
+          .addImm(RISCV::VLMaxSentinel)
+          .addImm(Log2_64(8))
+          .addImm(RISCVVType::TAIL_AGNOSTIC | RISCVVType::MASK_AGNOSTIC)
+          .addMemOperand(MMO)
+          .setMIFlag(Flags);
+    } else {
+      BuildMI(MBB, I, DL, get(Opcode), DstReg)
+          .addFrameIndex(FI)
+          .addMemOperand(MMO)
+          .setMIFlag(Flags);
+    }
     NumVRegReloaded += TRI->getRegSizeInBits(*RC) / RISCV::RVVBitsPerBlock;
   } else {
     MachineMemOperand *MMO = MF->getMachineMemOperand(
@@ -4651,6 +4731,15 @@ RISCV::isRVVSpillForZvlsseg(unsigned Opcode) {
     return std::make_pair(7u, 1u);
   case RISCV::PseudoVSPILL8_M1:
   case RISCV::PseudoVRELOAD8_M1:
+    return std::make_pair(8u, 1u);
+  case RISCV::PseudoVSPILL_VRM2:
+  case RISCV::PseudoVRELOAD_VRM2:
+    return std::make_pair(2u, 1u);
+  case RISCV::PseudoVSPILL_VRM4:
+  case RISCV::PseudoVRELOAD_VRM4:
+    return std::make_pair(4u, 1u);
+  case RISCV::PseudoVSPILL_VRM8:
+  case RISCV::PseudoVRELOAD_VRM8:
     return std::make_pair(8u, 1u);
   }
 }

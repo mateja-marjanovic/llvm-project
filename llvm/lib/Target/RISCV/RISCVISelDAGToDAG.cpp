@@ -61,6 +61,48 @@ void RISCVDAGToDAGISel::PreprocessISelDAG() {
       if (VT.isInteger())
         Src = CurDAG->getNode(ISD::ANY_EXTEND, DL, Subtarget->getXLenVT(),
                               N->getOperand(0));
+
+      // NS-CORE: If the vector is wider than the RVV vector register file,
+      // we need to split it into smaller chunks.
+      if ((Subtarget->hasStrictLMUL() || Subtarget->hasFractionalLMUL()) &&
+          VT.isScalableVector() &&
+          VT.getSizeInBits().getKnownMinValue() > RISCV::RVVBitsPerBlock) {
+        EVT SubVT;
+        switch (VT.getVectorElementType().getScalarSizeInBits()) {
+        case 64:
+          SubVT = VT.isInteger() ? MVT::nxv1i64 : MVT::nxv1f64;
+          break;
+        case 32:
+          SubVT = VT.isInteger() ? MVT::nxv2i32 : MVT::nxv2f32;
+          break;
+        case 16:
+          SubVT = VT.isInteger() ? MVT::nxv4i16 : MVT::nxv4f16;
+          break;
+        case 8:
+          SubVT = MVT::nxv8i8;
+          break;
+        case 1:
+          SubVT = MVT::nxv64i1;
+          break;
+        }
+
+        unsigned NumElts = VT.getVectorMinNumElements();
+        unsigned NumSubElts = SubVT.getVectorMinNumElements();
+
+        SmallVector<SDValue> Ops, SubVec, Inserts;
+        Inserts.push_back(CurDAG->getUNDEF(VT));
+        for (unsigned i = 0; i < NumElts / NumSubElts; ++i) {
+          Ops.push_back(CurDAG->getNode(Opc, DL, SubVT, CurDAG->getUNDEF(SubVT),
+                                        N->getOperand(0), VL));
+          Inserts.push_back(
+              CurDAG->getNode(ISD::INSERT_SUBVECTOR, DL, VT, Inserts[i], Ops[i],
+                              CurDAG->getIntPtrConstant(i * NumSubElts, DL)));
+        }
+
+        Result = Inserts.back();
+        break;
+      }
+
       Result = CurDAG->getNode(Opc, DL, VT, CurDAG->getUNDEF(VT), Src, VL);
       break;
     }
